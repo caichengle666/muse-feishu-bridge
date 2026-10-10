@@ -38,8 +38,10 @@ export interface InboxItem {
   /** 卡片点击的原始 value / form_value */
   cardValue?: unknown;
   cardFormValue?: unknown;
-  /** 消息里被 @ 的人/机器人（不含本机器人），open_id 可直接放进 outbox 的 ats */
-  mentions?: { openId: string; name: string }[];
+  /** 消息里被 @ 的人/机器人，按出现顺序；本机器人自己那项带 isMe: true */
+  mentions?: { openId: string; name: string; isMe?: boolean }[];
+  /** 恒为 true：能进 inbox 就说明在叫本机器人（私聊，或群里 @ 了它） */
+  addressedToMe?: boolean;
   /** 来自协作机器人（config.peerBots） */
   fromBot?: boolean;
   /** 协作机器人的称呼 */
