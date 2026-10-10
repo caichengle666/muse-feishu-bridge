@@ -1,4 +1,5 @@
 import { readFileSync, statSync } from "node:fs";
+import { applyAts, type AtTarget } from "./mentions.js";
 import { basename, extname } from "node:path";
 import type { FeishuCardAction, FeishuConfig, FeishuMessage } from "./types.js";
 import { chooseProxy, makeProxyAgent } from "./proxy.js";
@@ -191,7 +192,15 @@ export class FeishuTransport {
     const message = event?.message;
     const sender = event?.sender;
     if (!message) return;
-    if (sender?.sender_type === "bot") return;
+    const fromBot = sender?.sender_type === "bot" || sender?.sender_type === "app";
+    if (fromBot) {
+      const sid = sender?.sender_id || {};
+      // 自己发的消息不处理（飞书本来也不推送，双保险）
+      if ((this.botOpenId && sid.open_id === this.botOpenId) || (sid.app_id && sid.app_id === this.config.appId)) return;
+      if (!this.config.acceptBotMessages) return;
+      // 记下完整 sender_id，方便把对方填进 config.peerBots
+      debugLog("feishu.message.from_bot", { messageId: message.message_id, senderId: sid, chatId: message.chat_id });
+    }
 
     debugLog("feishu.message.received", {
       messageId: message.message_id,
@@ -217,6 +226,7 @@ export class FeishuTransport {
       chatType: message.chat_type,
       chatMode,
       senderOpenId: sender?.sender_id?.open_id || "unknown",
+      ...(fromBot ? { senderType: "bot" as const, ...(typeof sender?.sender_id?.app_id === "string" ? { senderAppId: sender.sender_id.app_id } : {}) } : {}),
       msgType: message.message_type,
       content: message.content || "",
       rootId: message.root_id,
@@ -321,14 +331,12 @@ export class FeishuTransport {
    *   text 消息 <at user_id="ou_x">主人</at>；卡片 markdown <at id=ou_x></at>；
    *   post 富文本的 text 元素不解析 <at>（原版会把标签原样显示出来），所以含 @主人 时 post 降级为 text。
    */
-  async replyText(messageId: string, text: string, opts: { uuid?: string; atOpenId?: string } = {}) {
-    let mode = chooseMessageMode(text);
-    const hasAt = Boolean(opts.atOpenId) && text.includes("@主人");
+  async replyText(messageId: string, text: string, opts: { uuid?: string; atOpenId?: string; ats?: AtTarget[]; forceText?: boolean } = {}) {
+    let mode = opts.forceText ? "text" : chooseMessageMode(text);
+    const targets: AtTarget[] = [...(opts.ats || []), ...(opts.atOpenId ? [{ id: opts.atOpenId, name: "主人" }] : [])];
+    const hasAt = targets.some((t) => t.prefix || (t.name && text.includes("@" + t.name)));
     if (hasAt && mode === "post") mode = "text";
-    if (hasAt) {
-      const id = opts.atOpenId!;
-      text = mode === "interactive" ? text.replace(/@主人/g, `<at id=${id}></at>`) : text.replace(/@主人/g, `<at user_id="${id}">主人</at>`);
-    }
+    if (hasAt) text = applyAts(text, targets, mode === "interactive" ? "card" : "text");
     if (mode === "interactive") {
       await this.replyMarkdownCard(messageId, text, opts.uuid);
       return;

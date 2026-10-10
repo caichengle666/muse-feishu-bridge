@@ -1,6 +1,7 @@
 /** config.ts — config.json / secrets.env 的加载与校验（白名单 fail-closed）。 */
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import type { PeerBot } from "./mentions.js";
 
 export interface BridgeConfig {
   /** 允许与机器人对话的飞书 open_id。为空时拒绝启动（fail-closed）。 */
@@ -31,6 +32,18 @@ export interface BridgeConfig {
    * classic = 旧版（短回复纯文本、长回复才用卡片，另发"收到，正在处理"文字）。
    */
   replyStyle?: "card" | "classic";
+  /**
+   * 协作机器人（机器人 @ 机器人接力）。登记后：
+   *   - 它们在群里 @ 本机器人的消息会被接收（需在飞书开放平台开通
+   *     "获取群组中其他机器人和用户@当前机器人的消息"权限 im:message.group_at_msg.include_bot:readonly）；
+   *   - 助手回复时可以用 outbox 的 ats 真正 @ 它们。
+   * name：称呼；appId：对方 App ID（cli_ 开头，用于识别发送者）；openId：对方在本应用里的 open_id（用 /ids 获取，发 @ 用）。
+   */
+  peerBots?: PeerBot[];
+  /** 同一会话里每分钟最多接收几条机器人发来的消息，默认 6，超出丢弃并记日志 */
+  botMaxPerMinute?: number;
+  /** 机器人之间最多接力几手，默认 3；到上限后回复不再 @ 机器人 */
+  botMaxHops?: number;
   /** 下载用户发来的图片/文件的大小上限（MB），默认 20。 */
   maxDownloadMB?: number;
 }
@@ -106,6 +119,19 @@ export function validateConfig(cfg: BridgeConfig): ConfigCheck {
   }
   if (cfg.proxy !== undefined && cfg.proxy !== "auto" && cfg.proxy !== "off" && !/^https?:\/\/[^\s]+$/i.test(String(cfg.proxy))) errors.push('proxy 只能是 "auto"、"off" 或 http(s):// 开头的代理地址');
   if (cfg.dedupSameTextSeconds !== undefined && !(Number.isFinite(cfg.dedupSameTextSeconds) && cfg.dedupSameTextSeconds >= 0 && cfg.dedupSameTextSeconds <= 600)) errors.push("dedupSameTextSeconds 须为 0–600 的数字");
+  if (cfg.peerBots !== undefined) {
+    if (!Array.isArray(cfg.peerBots)) errors.push("peerBots 必须是数组");
+    else
+      cfg.peerBots.forEach((p, i) => {
+        if (!p || typeof p.name !== "string" || !p.name.trim()) errors.push(`peerBots[${i}].name 不能为空`);
+        if (p?.openId !== undefined && !/^ou_[A-Za-z0-9_-]+$/.test(String(p.openId))) errors.push(`peerBots[${i}].openId 应为 ou_ 开头`);
+        if (p?.appId !== undefined && !/^cli_[A-Za-z0-9]+$/.test(String(p.appId))) errors.push(`peerBots[${i}].appId 应为 cli_ 开头`);
+        if (p && !p.openId && !p.appId) errors.push(`peerBots[${i}] 至少要填 openId 或 appId`);
+        if (p && p.appId && !p.openId) warnings.push(`peerBots[${i}]（${p.name}）没填 openId：能收到它的消息，但回复里 @ 不了它（在群里发 "@本机器人 /ids @${p.name}" 获取）`);
+      });
+  }
+  if (cfg.botMaxPerMinute !== undefined && !isPosNum(cfg.botMaxPerMinute)) errors.push("botMaxPerMinute 必须是正数");
+  if (cfg.botMaxHops !== undefined && !(Number.isInteger(cfg.botMaxHops) && cfg.botMaxHops >= 1 && cfg.botMaxHops <= 10)) errors.push("botMaxHops 须为 1–10 的整数");
   if (cfg.groupPolicy === "open") warnings.push("groupPolicy=open：群里白名单成员不 @ 机器人也会触发");
   return { errors, warnings };
 }

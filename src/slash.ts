@@ -26,6 +26,9 @@ export interface SlashContext {
   startedAt: number;
   now: () => number;
   version: string;
+  /** /ids 用：发送者 open_id、消息里被 @ 的人/机器人（不含本机器人） */
+  senderOpenId?: string;
+  mentions?: { openId: string; name: string }[];
 }
 
 async function count(dir: string): Promise<number> {
@@ -50,6 +53,16 @@ const COMMANDS: Record<string, { desc: string; run: Handler }> = {
     run: () => "可用命令：\n" + Object.entries(COMMANDS).map(([k, v]) => `/${k} - ${v.desc}`).join("\n"),
   },
   ping: { desc: "测试连通性", run: () => "pong 🏓" },
+  ids: {
+    desc: "查看 open_id（本应用视角）：/ids @某人 @某机器人",
+    run: (ctx) =>
+      [
+        `你：${ctx.senderOpenId || "未知"}`,
+        ...(ctx.mentions || []).map((m) => `${m.name || "某人"}：${m.openId}`),
+        ...((ctx.mentions || []).length ? [] : ["（在命令后面 @ 要查的人或机器人）"]),
+        "填进 config.json 的 peerBots[].openId 后，回复里就能 @ 到它。",
+      ].join("\n"),
+  },
   status: {
     desc: "查看桥接状态",
     run: async (ctx) =>

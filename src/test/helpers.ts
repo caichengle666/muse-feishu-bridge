@@ -10,6 +10,7 @@ import { CardEventDedupe, HeartbeatWriter, RouteStore, SeenStore } from "../stat
 import { createBridge, type Bridge, type BridgeTransport } from "../bridge.js";
 import type { BridgeConfig } from "../config.js";
 import type { FeishuMessage } from "../types.js";
+import type { AtTarget } from "../mentions.js";
 
 export interface Call {
   method: string;
@@ -74,7 +75,10 @@ export class FakeTransport implements BridgeTransport {
     return this.delivered.filter((c) => c.method === "replyCard" || c.method === "updateCard");
   }
 
-  async replyText(messageId: string, text: string, opts: { uuid?: string; atOpenId?: string } = {}) {
+  /** replyText 每次调用的 opts（ats / forceText），与 calls 中 replyText 的顺序一致 */
+  textOpts: { target: string; text: string; opts: { uuid?: string; atOpenId?: string; ats?: AtTarget[]; forceText?: boolean } }[] = [];
+  async replyText(messageId: string, text: string, opts: { uuid?: string; atOpenId?: string; ats?: AtTarget[]; forceText?: boolean } = {}) {
+    this.textOpts.push({ target: messageId, text, opts });
     await this.rec("replyText", messageId, text, opts.uuid);
   }
   private cardSeq = 0;
