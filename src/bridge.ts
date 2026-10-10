@@ -134,7 +134,8 @@ export function createBridge(d: BridgeDeps): Bridge {
       if (!existsSync(d.paths.config)) throw new Error("找不到 config.json");
       const raw = JSON.parse(await readFile(d.paths.config, "utf8")) as BridgeConfig;
       const list = Array.isArray(raw.peerBots) ? raw.peerBots : (raw.peerBots = []);
-      const entry = list.find((x) => x && x.name === name);
+      // 先按 open_id 找（配置里的称呼可能和飞书显示名不同），再按名字找
+      const entry = list.find((x) => x && x.openId === openId) || list.find((x) => x && x.name === name);
       let res: "updated" | "added" | "same";
       if (entry) {
         res = entry.openId === openId ? "same" : "updated";
@@ -144,7 +145,7 @@ export function createBridge(d: BridgeDeps): Bridge {
         res = "added";
       }
       if (res !== "same") await atomicWriteJson(d.paths.config, raw);
-      const live = peers.find((p) => p.name === name);
+      const live = peers.find((p) => p.openId === openId) || peers.find((p) => p.name === name);
       if (live) live.openId = openId;
       else peers.push({ name, openId });
       log("daemon.config_peer_saved", { peer: name, openId, res });
@@ -156,8 +157,8 @@ export function createBridge(d: BridgeDeps): Bridge {
     const buttons: Record<string, unknown>[] = [];
     for (const m of ms) {
       if (!OPEN_ID_RE.test(m.openId) || !m.name) continue;
+      if (peers.some((p) => p.openId === m.openId)) continue; // 已经登记好了（不管配置里叫什么）
       const peer = peers.find((p) => p.name === m.name);
-      if (peer && peer.openId === m.openId) continue; // 已经填好了
       buttons.push({
         tag: "button",
         text: { tag: "plain_text", content: peer ? `填入 ${m.name} 的 open_id` : `登记 ${m.name} 为协作机器人` },
@@ -255,10 +256,11 @@ export function createBridge(d: BridgeDeps): Bridge {
         hopNote = `\n〔接力 ${outHop}/${botMaxHops}〕`;
       }
     }
-    const plainText = handoff;
+    // @ 了主人和发送者以外的人：对方可能是没登记的机器人（飞书事件分不出人和机器人），卡片里的 @ 叫不动机器人，所以发纯文本
+    const plainText = handoff || targets.some((x) => x.id !== ownerOpenId && x.id !== r?.senderOpenId);
     const firstAts = [...targets, ...ownerAts];
     if (plainText) {
-      // @ 机器人：整段作为一条纯文本发（对方只能收到 @ 它的那条消息；卡片里的 @ 不保证触发对方的事件）
+      // @ 机器人（或可能是机器人的人）：整段作为一条纯文本发（对方只能收到 @ 它的那条消息；卡片里的 @ 不触发机器人）
       return {
         textChunkChars: 20_000,
         sendText: async (chunk, uuid, info) => {
@@ -376,7 +378,8 @@ export function createBridge(d: BridgeDeps): Bridge {
     const parsed = parseMessageInput(msg, botOpenId);
     let text = parsed.text;
     // 给助手看的正文：@自己 保留成「@名字（你）」；斜杠命令仍按去掉 @自己 的正文识别
-    let cmdText = parsed.text;
+    // 富文本（post）里 @自己 被标成「@名字（你）」，识别命令前去掉开头这一段
+    let cmdText = parsed.text.replace(/^@[^\n@]*?（你）\s*/, "");
     if (msg.msgType === "text") {
       try {
         const j = JSON.parse(msg.content || "{}");
@@ -412,7 +415,7 @@ export function createBridge(d: BridgeDeps): Bridge {
       recentText.set(key, t0);
     }
     // 斜杠命令：白名单之后、下载附件和入队之前；只拦截已登记的命令，其余照常交给助手
-    if (msg.msgType === "text" && !fromBot) {
+    if ((msg.msgType === "text" || msg.msgType === "post") && !fromBot) {
       const slash = parseSlashCommand(cmdText);
       if (slash) {
         let out: string | null = null;
@@ -468,8 +471,8 @@ export function createBridge(d: BridgeDeps): Bridge {
       ...(firstPath ? { filePath: firstPath } : {}),
       ...(attachments.length ? { attachments } : {}),
       ...(inboxMentions.length ? { mentions: inboxMentions } : {}),
-      // 能进 inbox 就说明是在叫你（私聊，或群里 @ 了你）
-      addressedToMe: true,
+      // 私聊，或群里 @ 了本机器人 = 在叫你；groupPolicy=open 时没 @ 的群消息也会进来，那时为 false
+      addressedToMe: msg.chatType === "p2p" || mentionsOpenId(msg.mentions, botOpenId),
       ...(fromBot ? { fromBot: true, senderName: peerName, hop } : {}),
     };
     try {
