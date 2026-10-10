@@ -124,28 +124,39 @@ test("机器人消息限频：同一会话每分钟超过 botMaxPerMinute 的丢
 
 // ------------------------------------------------------------ 出站
 
-test("ats（classic）：只在第一段 @，后面几段只保留 @主人 兼容；陌生 open_id 被丢弃并记日志", async () => {
+test("ats（classic）：只 @ 主人时照常分段，只在第一段 @；陌生 open_id 被丢弃并记日志", async () => {
   const env = await makeEnv({ config: { ...CFG, replyStyle: "classic" } });
   await env.bridge.onMessage(groupMsg("om_o1"));
   const long = Array.from({ length: 150 }, (_, i) => `第${i}行 ` + "x".repeat(40)).join("\n");
-  await writeOutbox(env, "om_o1", { text: long, ats: ["ou_zhang", "ou_stranger"] });
+  await writeOutbox(env, "om_o1", { text: long, ats: ["主人", "ou_stranger"] });
   await env.bridge.drain();
   const sends = env.t.textOpts.filter((x) => x.target === "om_o1");
   assert.ok(sends.length >= 2);
-  assert.deepEqual(sends[0].opts.ats!.map((a) => [a.id, Boolean(a.prefix)]), [["ou_zhang", true], ["ou_owner", false]]);
+  assert.deepEqual(sends[0].opts.ats!.map((a) => a.id), ["ou_owner", "ou_owner"]);
   assert.deepEqual(sends[1].opts.ats!.map((a) => a.id), ["ou_owner"]);
   assert.ok(!sends[0].opts.forceText);
   assert.ok(env.logs.some((l) => l.event === "daemon.ats_dropped" && JSON.stringify(l.data).includes("ou_stranger")));
 });
 
-test("ats（卡片）：卡片里渲染成 <at id>；ats 含主人且正文有 @主人 时只 @ 一次", async () => {
+test("ats（卡片）：只 @ 主人时仍是卡片，<at id> 只出现一次", async () => {
   const env = await makeEnv({ config: { ...CFG, replyStyle: "card" } });
   await env.bridge.onMessage(groupMsg("om_o2"));
-  await writeOutbox(env, "om_o2", { text: "@主人 张三那边好了", ats: ["张三", "主人"] });
+  await writeOutbox(env, "om_o2", { text: "@主人 那边好了", ats: ["主人"] });
   await env.bridge.drain();
   const md = cardText(env.t.cards()[0].arg);
-  assert.equal(md, "<at id=ou_zhang></at> <at id=ou_owner></at> 张三那边好了");
   assert.equal(md.split("ou_owner").length - 1, 1);
+});
+
+test("@ 了主人和发送者以外的人（可能是没登记的机器人）：整段一条纯文本，不加接力标记", async () => {
+  const env = await makeEnv({ config: { ...CFG, replyStyle: "card" } });
+  await env.bridge.onMessage(groupMsg("om_o3"));
+  await writeOutbox(env, "om_o3", { text: "@张三 那边好了", ats: ["张三"] });
+  await env.bridge.drain();
+  const sends = env.t.textOpts.filter((x) => x.target === "om_o3");
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0].opts.forceText, true);
+  assert.ok(sends[0].opts.ats!.some((a) => a.id === "ou_zhang"));
+  assert.ok(!/〔接力/.test(sends[0].text));
 });
 
 test("接力：ats 含协作机器人 → 整段一条纯文本（不用卡片）、文末带〔接力 1/3〕；处理中卡片被收尾成已完成", async () => {
@@ -382,4 +393,33 @@ test("富文本（post）里 @自己 也标「（你）」", async () => {
   await env.bridge.onMessage(textMsg("om_post2", "", { msgType: "post", content: JSON.stringify(post) }));
   const item = await readJson(join(env.paths.inbox, "om_post2.json"));
   assert.equal(item.text, "@本机（你） 看下");
+});
+
+test("groupPolicy=open：群里没 @ 本机器人的消息 addressedToMe=false、正文没有（你）", async () => {
+  const env = await makeEnv({ config: { ...CFG, groupPolicy: "open" } as any });
+  await env.bridge.onMessage(textMsg("om_open", "大家好 @_user_1", { chatType: "group", mentions: [m("@_user_1", "张三", "ou_zhang")] }));
+  const item = await readJson(join(env.paths.inbox, "om_open.json"));
+  assert.equal(item.addressedToMe, false);
+  assert.ok(!/（你）/.test(item.text));
+  await env.bridge.onMessage(textMsg("om_p2p", "你好"));
+  assert.equal((await readJson(join(env.paths.inbox, "om_p2p.json"))).addressedToMe, true);
+});
+
+test("富文本（post）里 @自己 再写斜杠命令，照常当命令执行", async () => {
+  const env = await makeEnv({ config: CFG });
+  const post = { zh_cn: { content: [[{ tag: "at", user_id: BOT, user_name: "本机" }, { tag: "text", text: " /ping" }]] } };
+  await env.bridge.onMessage(textMsg("om_post3", "", { chatType: "group", msgType: "post", content: JSON.stringify(post), mentions: [m("@_user_1", "本机", BOT)] }));
+  assert.ok(!(await ls(env.paths.inbox)).includes("om_post3.json"));
+});
+
+test("/ids：配置里的称呼和飞书显示名不同，但 open_id 已登记 → 不再出登记按钮；点旧按钮也只更新原条目不重复", async () => {
+  const peerBots = [{ name: "小B", openId: "ou_peerb", appId: "cli_peerb" }];
+  const env = await makeEnv({ config: { ...CFG, peerBots } });
+  await writeFile(env.paths.config, JSON.stringify({ allowedOpenIds: ["ou_owner"], peerBots }, null, 2));
+  await env.bridge.onMessage(textMsg("om_n1", "@_user_1 /ids @_user_2", { chatType: "group", mentions: [m("@_user_1", "本机", BOT), m("@_user_2", "muse助手1号选手", "ou_peerb")] }));
+  assert.equal(findButtons(env.t.calls.find((c) => c.target === "om_n1")!.arg).length, 0);
+  await click(env, "om_card9", { mfb: "peer_fill", name: "muse助手1号选手", openId: "ou_peerb" }, "ev9");
+  const cfg = await readJson(env.paths.config);
+  assert.equal(cfg.peerBots.length, 1);
+  assert.equal(cfg.peerBots[0].name, "小B");
 });
