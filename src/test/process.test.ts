@@ -233,3 +233,34 @@ test("e2e: keepalive --install-cron 幂等，不动用户其他条目；--uninst
   assert.equal(spawnSync("bash", [ka, "--uninstall-cron"], { env }).status, 0);
   assert.deepEqual(readFileSync(tab, "utf8").trim().split("\n"), ["0 3 * * * /usr/bin/backup.sh"]);
 });
+
+test("e2e: 机器人 @ 机器人——登记的协作机器人 @ 本机器人才入队；自己发的、没 @ 的丢弃；回复 @ 它时是纯文本 <at user_id> 并带接力标记", { skip: !HAS_PROC, timeout: 30_000 }, async (t) => {
+  const r = await makeRoot({ allowedOpenIds: ["ou_owner"], ackDelaySec: 0, peerBots: [{ name: "小B", openId: "ou_peerb", appId: "cli_peerb" }] });
+  t.after(() => cleanup(r));
+  const a = r.start();
+  await ready(r, a);
+  const botEv = (id: string, sender: Record<string, unknown>, mentionSelf: boolean, text = "@_user_1 请整理") =>
+    r.event("im.message.receive_v1", {
+      sender: { sender_type: "app", sender_id: sender },
+      message: {
+        message_id: id, chat_id: "oc_g", chat_type: "group", message_type: "text", content: JSON.stringify({ text }),
+        mentions: mentionSelf ? [{ key: "@_user_1", name: "本机", id: { open_id: "ou_bot" } }] : [],
+      },
+    });
+  await botEv("om_p1", { open_id: "ou_peerb", app_id: "cli_peerb" }, false, "B 的结果");
+  await botEv("om_p0", { open_id: "ou_bot", app_id: "cli_test" }, true);
+  await botEv("om_p2", { open_id: "ou_peerb", app_id: "cli_peerb" }, true);
+  await waitFor(() => existsSync(join(r.root, "inbox", "om_p2.json")));
+  await new Promise((res) => setTimeout(res, 300));
+  assert.deepEqual((await ls(join(r.root, "inbox"))).filter((f) => f.endsWith(".json")), ["om_p2.json"]);
+  const item = JSON.parse(await readFile(join(r.root, "inbox", "om_p2.json"), "utf8"));
+  assert.equal(item.fromBot, true);
+  assert.equal(item.hop, 1);
+  await writeFile(join(r.root, "outbox", "om_p2.json"), JSON.stringify({ messageId: "om_p2", text: "整理好了 @小B 请核对", ats: ["小B"] }));
+  await waitFor(() => existsSync(join(r.root, "sent", "om_p2.json")), 8000);
+  const rep = r.calls("reply").find((c) => c.args.path.message_id === "om_p2");
+  assert.equal(rep.args.data.msg_type, "text");
+  const txt = JSON.parse(rep.args.data.content).text;
+  assert.match(txt, /整理好了 <at user_id="ou_peerb">小B<\/at> 请核对/);
+  assert.match(txt, /〔接力 2\/3〕$/);
+});

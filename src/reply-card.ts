@@ -7,6 +7,8 @@
  * 参考：caichengle666/omp-feishu-lark 的状态卡（状态色标题）、hermes-feishu-streaming-card 的页脚。
  */
 
+import { applyAts, type AtTarget } from "./mentions.js";
+
 export type CardStatus = "running" | "slow" | "done" | "timeout" | "failed" | "info";
 
 const HEAD: Record<CardStatus, { title: string; template: string }> = {
@@ -27,8 +29,10 @@ export interface ReplyCardInput {
   footer?: string[];
   /** 多段回复的段号（1 基） */
   part?: { index: number; total: number };
-  /** 把 "@主人" 换成卡片里的 @ 提醒 */
+  /** 把 "@主人" 换成卡片里的 @ 提醒（兼容旧参数） */
   atOpenId?: string;
+  /** @ 目标：正文 "@名字" 换成 @ 标签，prefix 的在开头补 */
+  ats?: AtTarget[];
 }
 
 export function buildReplyCard(input: ReplyCardInput): Record<string, unknown> {
@@ -36,7 +40,8 @@ export function buildReplyCard(input: ReplyCardInput): Record<string, unknown> {
   let title = input.title || head.title;
   if (input.part && input.part.total > 1) title += `（${input.part.index}/${input.part.total}）`;
   let md = (input.markdown || "").trim() || " ";
-  if (input.atOpenId && /^[A-Za-z0-9_-]+$/.test(input.atOpenId)) md = md.replace(/@主人/g, `<at id=${input.atOpenId}></at>`);
+  const ats = [...(input.ats || []), ...(input.atOpenId ? [{ id: input.atOpenId, name: "主人" }] : [])];
+  if (ats.length) md = applyAts(md, ats, "card");
   const footer = (input.footer || []).filter(Boolean).join(" · ");
   const elements: Record<string, unknown>[] = [{ tag: "markdown", content: md }];
   if (footer) {

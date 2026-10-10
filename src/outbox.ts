@@ -36,6 +36,8 @@ export interface ReplyPayload {
   text: string;
   file?: string;
   card?: Record<string, unknown>;
+  /** 要 @ 的对象：open_id 或名字（只能是本条消息里被 @ 的人、发送者、主人、peerBots） */
+  ats?: string[];
 }
 
 /** 解析 outbox JSON。非法 JSON / 顶层不是对象 → 抛错（调用方决定重试还是失败）。 */
@@ -50,6 +52,7 @@ export function parseOutboxPayload(raw: string, fallbackId: string): ReplyPayloa
   if (typeof o.file === "string" && o.file) out.file = o.file;
   if (o.card && typeof o.card === "object" && !Array.isArray(o.card)) out.card = o.card as Record<string, unknown>;
   if (typeof o.replyTo === "string" && /^om_[A-Za-z0-9_-]+$/.test(o.replyTo)) out.replyTo = o.replyTo;
+  if (Array.isArray(o.ats)) out.ats = o.ats.filter((x): x is string => typeof x === "string" && x.trim() !== "").slice(0, 20);
   return out;
 }
 
@@ -298,6 +301,8 @@ export interface Channel {
   sendCard(card: Record<string, unknown>, uuid: string): Promise<void>;
   /** 尽力通知用户（失败忽略） */
   notify(text: string): Promise<void>;
+  /** 覆盖文本分段长度（@ 机器人接力时整段一条发，免得后面几段对方收不到） */
+  textChunkChars?: number;
 }
 
 export interface EngineOptions {
@@ -342,7 +347,7 @@ interface Part {
 function buildParts(p: ReplyPayload, ch: Channel, opts: EngineOptions): Part[] {
   const id = p.messageId;
   const parts: Part[] = [];
-  const chunks = splitReplyText(p.text, opts.chunkChars ?? REPLY_CHUNK_CHARS);
+  const chunks = splitReplyText(p.text, ch.textChunkChars ?? opts.chunkChars ?? REPLY_CHUNK_CHARS);
   chunks.forEach((c, i) => {
     const key = `text:${i}`;
     parts.push({ key, label: "文本", run: () => ch.sendText(c, partUuid(id, key), { index: i, total: chunks.length }) });
