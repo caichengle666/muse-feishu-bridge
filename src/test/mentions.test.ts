@@ -74,10 +74,13 @@ test("inbox 携带 mentions（真实 open_id，不含本机器人）；routes.js
   const env = await makeEnv({ config: CFG });
   await env.bridge.onMessage(groupMsg("om_g1"));
   const item = await readJson(join(env.paths.inbox, "om_g1.json"));
-  assert.deepEqual(item.mentions, [{ openId: "ou_zhang", name: "张三" }, { openId: "ou_peerb", name: "小B" }]);
-  assert.equal(item.text, "@张三 @小B 帮忙看下");
+  // 给助手的名单含自己（按消息顺序，标 isMe），正文里 @自己 保留成「（你）」
+  assert.deepEqual(item.mentions, [{ openId: BOT, name: "本机", isMe: true }, { openId: "ou_zhang", name: "张三" }, { openId: "ou_peerb", name: "小B" }]);
+  assert.equal(item.text, "@本机（你） @张三 @小B 帮忙看下");
+  assert.equal(item.addressedToMe, true);
   assert.equal(item.fromBot, undefined);
-  assert.deepEqual(env.routes.get("om_g1")!.mentions, item.mentions);
+  // 回复路由（决定能 @ 谁）不含自己
+  assert.deepEqual(env.routes.get("om_g1")!.mentions, [{ openId: "ou_zhang", name: "张三" }, { openId: "ou_peerb", name: "小B" }]);
 });
 
 test("机器人消息：未登记的丢弃；登记但没 @ 本机器人的丢弃（A @ B 后 B 的普通回复不会回流到 A）；登记且 @ 了 → 入队，标 fromBot、读出接力手数", async () => {
@@ -99,7 +102,7 @@ test("机器人消息：未登记的丢弃；登记但没 @ 本机器人的丢�
   assert.equal(item.fromBot, true);
   assert.equal(item.senderName, "小B");
   assert.equal(item.hop, 2);
-  assert.equal(item.text, "请汇总");
+  assert.equal(item.text, "@本机（你） 请汇总");
   // 机器人发斜杠命令不执行
   await env.bridge.onMessage(botMsg("om_b5", "@_user_1 /ping"));
   assert.ok((await ls(env.paths.inbox)).includes("om_b5.json"));
@@ -362,3 +365,21 @@ test("实测问题：1号收到接力后 @ 了没登记的 2号——要发纯�
   assert.match(s.text, /〔接力 2\/3〕$/);
 });
 
+
+test("多个机器人被同一条消息 @：每个机器人看到的「（你）」是它自己；群里 @ 了自己再发斜杠命令照常执行", async () => {
+  const env = await makeEnv({ config: CFG });
+  await env.bridge.onMessage(textMsg("om_multi", "@_user_1 @_user_2 大家在干嘛", { chatType: "group", mentions: [m("@_user_1", "1号", "ou_one"), m("@_user_2", "本机", BOT)] }));
+  const item = await readJson(join(env.paths.inbox, "om_multi.json"));
+  assert.equal(item.text, "@1号 @本机（你） 大家在干嘛");
+  assert.deepEqual(item.mentions.map((x: any) => [x.name, Boolean(x.isMe)]), [["1号", false], ["本机", true]]);
+  await env.bridge.onMessage(textMsg("om_slash", "@_user_1 /ping", { chatType: "group", mentions: [m("@_user_1", "本机", BOT)] }));
+  assert.ok(!(await ls(env.paths.inbox)).includes("om_slash.json"), "斜杠命令不进 inbox");
+});
+
+test("富文本（post）里 @自己 也标「（你）」", async () => {
+  const env = await makeEnv({ config: CFG });
+  const post = { zh_cn: { content: [[{ tag: "at", user_id: BOT, user_name: "本机" }, { tag: "text", text: " 看下" }]] } };
+  await env.bridge.onMessage(textMsg("om_post2", "", { msgType: "post", content: JSON.stringify(post) }));
+  const item = await readJson(join(env.paths.inbox, "om_post2.json"));
+  assert.equal(item.text, "@本机（你） 看下");
+});
