@@ -79,7 +79,7 @@ export function parseMessageInput(msg: FeishuMessage, botOpenId?: string): { tex
         parts.push(locale.title.trim());
       }
       for (const para of locale?.content || []) {
-        const paragraphText = extractPostText(para, attachments).trim();
+        const paragraphText = extractPostText(para, attachments, botOpenId).trim();
         if (paragraphText) parts.push(paragraphText);
       }
       collectAttachments(json, attachments);
@@ -178,10 +178,10 @@ function isPostBody(value: unknown): value is PostBody {
   return Array.isArray(record.content);
 }
 
-function extractPostText(node: unknown, attachments: FeishuAttachment[]): string {
+function extractPostText(node: unknown, attachments: FeishuAttachment[], botOpenId?: string): string {
   if (typeof node === "string") return node;
   if (!node || typeof node !== "object") return "";
-  if (Array.isArray(node)) return node.map((item) => extractPostText(item, attachments)).join("");
+  if (Array.isArray(node)) return node.map((item) => extractPostText(item, attachments, botOpenId)).join("");
 
   const obj = node as Record<string, unknown>;
   const tag = typeof obj.tag === "string" ? obj.tag : undefined;
@@ -192,7 +192,8 @@ function extractPostText(node: unknown, attachments: FeishuAttachment[]): string
   }
 
   if (tag === "at") {
-    return `@${typeof obj.user_name === "string" && obj.user_name ? obj.user_name : "user"}`;
+    const name = `@${typeof obj.user_name === "string" && obj.user_name ? obj.user_name : "user"}`;
+    return botOpenId && (obj.user_id === botOpenId || obj.open_id === botOpenId) ? `${name}（你）` : name;
   }
 
   if ((tag === "text" || tag === "a") && typeof obj.text === "string") {
@@ -201,7 +202,7 @@ function extractPostText(node: unknown, attachments: FeishuAttachment[]): string
 
   if (typeof obj.text === "string") return obj.text;
 
-  return Object.values(obj).map((item) => extractPostText(item, attachments)).join("");
+  return Object.values(obj).map((item) => extractPostText(item, attachments, botOpenId)).join("");
 }
 
 function collectAttachments(value: unknown, attachments: FeishuAttachment[]) {
