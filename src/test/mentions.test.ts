@@ -5,6 +5,7 @@ import { makeEnv, textMsg, writeOutbox, waitFor, ls, readJson, cardText } from "
 import { applyAts, parseHop, resolveAts } from "../mentions.js";
 import { validateConfig, type BridgeConfig } from "../config.js";
 import { join } from "node:path";
+import { writeFile } from "node:fs/promises";
 
 const BOT = "ou_bot"; // FakeTransport.getBotOpenId()
 const m = (key: string, name: string, open_id: string) => ({ key, name, id: { open_id } });
@@ -283,4 +284,67 @@ test("场景：登记了 appId 但没填 openId 的机器人——能收它的�
   // 发送者本身就在允许范围内：用它这条消息里的 open_id @ 回去，按接力处理
   assert.ok(s.opts.ats!.some((a) => a.id === "ou_peerd_seen"));
   assert.match(s.text, /〔接力 2\/3〕$/);
+});
+
+const findButtons = (c: any): any[] => JSON.stringify(c ?? null).includes('"button"') ? (c.body.elements as any[]).filter((e) => e.tag === "button") : [];
+const click = (env: any, messageId: string, value: unknown, eventId: string) =>
+  env.bridge.onCardAction({ messageId, chatId: "oc_1", operatorOpenId: "ou_owner", eventId, value });
+
+test("/ids 卡片：询问是否填入 config.json；点按钮才写入，立即生效；其他配置不动", async () => {
+  const env = await makeEnv({ config: { ...CFG, peerBots: [{ name: "小B", appId: "cli_peerb" }], replyStyle: "classic" } });
+  await writeFile(env.paths.config, JSON.stringify({ allowedOpenIds: ["ou_owner"], peerBots: [{ name: "小B", appId: "cli_peerb" }], other: 1 }, null, 2));
+  await env.bridge.onMessage(textMsg("om_l1", "@_user_1 /ids @_user_2 @_user_3", { chatType: "group", mentions: [m("@_user_1", "本机", BOT), m("@_user_2", "小B", "ou_learned"), m("@_user_3", "小C", "ou_c")] }));
+  const reply = env.t.calls.find((c) => c.target === "om_l1" && c.method === "replyCard")!;
+  const btns = findButtons(reply.arg);
+  assert.deepEqual(btns.map((b) => b.text.content), ["填入 小B 的 open_id", "登记 小C 为协作机器人"]);
+  // 没点之前不写
+  assert.equal((await readJson(env.paths.config)).peerBots[0].openId, undefined);
+  await click(env, "om_card1", btns[0].behaviors[0].value, "ev1");
+  let cfg = await readJson(env.paths.config);
+  assert.equal(cfg.peerBots[0].openId, "ou_learned");
+  assert.equal(cfg.peerBots[0].appId, "cli_peerb");
+  assert.equal(cfg.other, 1);
+  const upd = env.t.calls.find((c) => c.method === "updateCard" && c.target === "om_card1")!;
+  assert.match(JSON.stringify(upd.arg), /已填入配置[\s\S]*不用重启/);
+  // 点按钮不会交给助手
+  assert.ok(!(await ls(env.paths.inbox)).some((f) => f.startsWith("card_")));
+  // 新登记小C
+  await click(env, "om_card1", btns[1].behaviors[0].value, "ev2");
+  cfg = await readJson(env.paths.config);
+  assert.deepEqual(cfg.peerBots[1], { name: "小C", openId: "ou_c" });
+  // 立即生效：小C 发来的消息被接受，回复能 @ 到小B
+  const fromC = botMsg("om_l9", "@_user_1 结果");
+  fromC.senderOpenId = "ou_c";
+  fromC.senderAppId = "cli_unknown";
+  await env.bridge.onMessage(fromC);
+  assert.ok((await ls(env.paths.inbox)).includes("om_l9.json"));
+  await env.bridge.onMessage(textMsg("om_l2", "让小B看看"));
+  await writeOutbox(env, "om_l2", { text: "好", ats: ["小B"] });
+  await env.bridge.drain();
+  assert.ok(env.t.textOpts.find((x) => x.target === "om_l2")!.opts.ats!.some((a) => a.id === "ou_learned"));
+  // 已填好的不再出按钮
+  await env.bridge.onMessage(textMsg("om_l3", "@_user_1 /ids @_user_2", { chatType: "group", mentions: [m("@_user_1", "本机", BOT), m("@_user_2", "小B", "ou_learned")] }));
+  assert.equal(findButtons(env.t.calls.find((c) => c.target === "om_l3")!.arg).length, 0);
+});
+
+test("/ids 卡片：非白名单的人点按钮无效；重复点击只处理一次", async () => {
+  const env = await makeEnv({ config: { ...CFG, peerBots: [{ name: "小B", appId: "cli_peerb" }] } });
+  await writeFile(env.paths.config, JSON.stringify({ peerBots: [{ name: "小B", appId: "cli_peerb" }] }));
+  const val = { mfb: "peer_fill", name: "小B", openId: "ou_x1" };
+  await env.bridge.onCardAction({ messageId: "om_c2", chatId: "oc_1", operatorOpenId: "ou_stranger", eventId: "e0", value: val });
+  assert.equal((await readJson(env.paths.config)).peerBots[0].openId, undefined);
+  await click(env, "om_c2", val, "e1");
+  await click(env, "om_c2", val, "e1");
+  assert.equal(env.t.calls.filter((c) => c.method === "updateCard").length, 1);
+});
+
+test("协作机器人 @ 本机器人时：按 appId 记下它的 open_id（只在内存，不改配置文件），之后能 @ 回它", async () => {
+  const env = await makeEnv({ config: { ...CFG, peerBots: [{ name: "小B", appId: "cli_peerb" }], replyStyle: "classic" } });
+  await writeFile(env.paths.config, JSON.stringify({ peerBots: [{ name: "小B", appId: "cli_peerb" }] }));
+  await env.bridge.onMessage(botMsg("om_l5", "@_user_1 干活"));
+  assert.equal((await readJson(env.paths.config)).peerBots[0].openId, undefined);
+  await env.bridge.onMessage(textMsg("om_l6", "让小B看看"));
+  await writeOutbox(env, "om_l6", { text: "好", ats: ["小B"] });
+  await env.bridge.drain();
+  assert.ok(env.t.textOpts.find((x) => x.target === "om_l6")!.opts.ats!.some((a) => a.id === "ou_peerb"));
 });

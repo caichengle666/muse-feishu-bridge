@@ -264,3 +264,46 @@ test("e2e: 机器人 @ 机器人——登记的协作机器人 @ 本机器人才
   assert.match(txt, /整理好了 <at user_id="ou_peerb">小B<\/at> 请核对/);
   assert.match(txt, /〔接力 2\/3〕$/);
 });
+
+test("e2e: 启动时 peerBots 为空 → /ids 卡片点确认 → 写入 config.json，同一个 daemon 进程不重启就能收这个机器人的消息并 @ 回它", { skip: !HAS_PROC, timeout: 30_000 }, async (t) => {
+  const r = await makeRoot({ allowedOpenIds: ["ou_owner"], ackDelaySec: 0, replyStyle: "classic" });
+  t.after(() => cleanup(r));
+  const a = r.start();
+  await ready(r, a);
+  const peerEv = (id: string) =>
+    r.event("im.message.receive_v1", {
+      sender: { sender_type: "app", sender_id: { open_id: "ou_peerb", app_id: "cli_peerb" } },
+      message: { message_id: id, chat_id: "oc_g", chat_type: "group", message_type: "text", content: JSON.stringify({ text: "@_user_1 干活" }), mentions: [{ key: "@_user_1", name: "本机", id: { open_id: "ou_bot" } }] },
+    });
+  // 登记前：机器人消息被丢弃
+  await peerEv("om_q0");
+  await new Promise((res) => setTimeout(res, 500));
+  assert.ok(!existsSync(join(r.root, "inbox", "om_q0.json")));
+  // 主人发 /ids @小B
+  await r.event("im.message.receive_v1", {
+    sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+    message: {
+      message_id: "om_q1", chat_id: "oc_g", chat_type: "group", message_type: "text", content: JSON.stringify({ text: "@_user_1 /ids @_user_2" }),
+      mentions: [{ key: "@_user_1", name: "本机", id: { open_id: "ou_bot" } }, { key: "@_user_2", name: "小B", id: { open_id: "ou_peerb" } }],
+    },
+  });
+  await waitFor(() => r.calls("reply").some((c) => c.args.path.message_id === "om_q1"), 8000);
+  const cardCall = r.calls("reply").find((c) => c.args.path.message_id === "om_q1");
+  const cardJson = JSON.parse(cardCall.args.data.content);
+  const btn = cardJson.body.elements.find((e: any) => e.tag === "button");
+  assert.equal(btn.text.content, "登记 小B 为协作机器人");
+  // 主人点按钮
+  await r.event("card.action.trigger", { operator: { open_id: "ou_owner" }, context: { open_message_id: "om_card_q", open_chat_id: "oc_g" }, action: { value: btn.behaviors[0].value }, token: "tk1" });
+  await waitFor(() => JSON.parse(readFileSync(join(r.root, "config.json"), "utf8")).peerBots?.length === 1, 8000);
+  assert.deepEqual(JSON.parse(readFileSync(join(r.root, "config.json"), "utf8")).peerBots, [{ name: "小B", openId: "ou_peerb" }]);
+  // 同一进程：小B 的消息现在被接收
+  await peerEv("om_q2");
+  await waitFor(() => existsSync(join(r.root, "inbox", "om_q2.json")), 8000);
+  assert.equal(a.exitCode, null, "daemon 没重启");
+  assert.equal(r.procs.length, 1);
+  // 回复能 @ 到它
+  await writeFile(join(r.root, "outbox", "om_q2.json"), JSON.stringify({ messageId: "om_q2", text: "好了", ats: ["小B"] }));
+  await waitFor(() => existsSync(join(r.root, "sent", "om_q2.json")), 8000);
+  const rep = r.calls("reply").find((c) => c.args.path.message_id === "om_q2");
+  assert.match(JSON.parse(rep.args.data.content).text, /<at user_id="ou_peerb">小B<\/at>/);
+});
