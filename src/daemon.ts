@@ -126,7 +126,8 @@ async function main(): Promise<void> {
       groupPolicy: cfg.groupPolicy || "mention",
       language: cfg.language || "zh",
       cardActionMode: "ws",
-      acceptBotMessages: Array.isArray(cfg.peerBots) && cfg.peerBots.length > 0,
+      // 始终放行到上层，由 bridge 按运行中的协作机器人名单过滤（/ids 卡片登记的新机器人不用重启就能收）
+      acceptBotMessages: true,
       ...(cfg.proxy ? { proxy: cfg.proxy } : {}),
     },
     async (msg) => {

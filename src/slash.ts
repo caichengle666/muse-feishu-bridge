@@ -60,7 +60,7 @@ const COMMANDS: Record<string, { desc: string; run: Handler }> = {
         `你：${ctx.senderOpenId || "未知"}`,
         ...(ctx.mentions || []).map((m) => `${m.name || "某人"}：${m.openId}`),
         ...((ctx.mentions || []).length ? [] : ["（在命令后面 @ 要查的人或机器人）"]),
-        "填进 config.json 的 peerBots[].openId 后，回复里就能 @ 到它。",
+
       ].join("\n"),
   },
   status: {
