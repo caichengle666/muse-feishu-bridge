@@ -1,0 +1,9 @@
+{
+  "allowedOpenIds": ["ou_xxx"],
+  "ownerOpenId": "ou_xxx",
+  "replyTimeoutMin": 20,
+  "groupPolicy": "mention",
+  "ackDelaySec": 8,
+  "proxy": "auto",
+  "dedupSameTextSeconds": 0
+}
