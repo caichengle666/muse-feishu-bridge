@@ -72,14 +72,17 @@ function sha(s: string): string {
   return createHash("sha256").update(s).digest("hex");
 }
 
-/** 把飞书文本里的 @ 占位符（@_user_1）换成名字；@机器人 去掉。 */
-export function resolveMentions(text: string, mentions: unknown, botOpenId?: string): string {
+/**
+ * 把飞书文本里的 @ 占位符（@_user_1）换成名字。
+ * @机器人自己：默认去掉；markSelf=true 时保留成「@名字（你）」——给助手看，免得它以为自己没被点到。
+ */
+export function resolveMentions(text: string, mentions: unknown, botOpenId?: string, markSelf = false): string {
   if (!Array.isArray(mentions) || !text) return text;
   let out = text;
   for (const m of mentions as { key?: string; name?: string; id?: { open_id?: string } }[]) {
     if (!m || typeof m.key !== "string" || !m.key) continue;
     const isBot = Boolean(botOpenId) && m.id?.open_id === botOpenId;
-    out = out.split(m.key).join(isBot ? "" : `@${m.name || "某人"}`);
+    out = out.split(m.key).join(isBot ? (markSelf ? `@${m.name || "我"}（你）` : "") : `@${m.name || "某人"}`);
   }
   return out.replace(/^\s+/, "").replace(/[ \t]{2,}/g, " ");
 }
@@ -372,10 +375,15 @@ export function createBridge(d: BridgeDeps): Bridge {
     const fromBot = peerName !== undefined;
     const parsed = parseMessageInput(msg, botOpenId);
     let text = parsed.text;
+    // 给助手看的正文：@自己 保留成「@名字（你）」；斜杠命令仍按去掉 @自己 的正文识别
+    let cmdText = parsed.text;
     if (msg.msgType === "text") {
       try {
         const j = JSON.parse(msg.content || "{}");
-        if (typeof j.text === "string") text = resolveMentions(j.text, msg.mentions, botOpenId).trim();
+        if (typeof j.text === "string") {
+          cmdText = resolveMentions(j.text, msg.mentions, botOpenId).trim();
+          text = resolveMentions(j.text, msg.mentions, botOpenId, true).trim();
+        }
       } catch {
         /* 保留 parsed.text */
       }
@@ -388,6 +396,8 @@ export function createBridge(d: BridgeDeps): Bridge {
       hop = h.hop ?? 1;
     }
     const mentions = extractMentions(msg.mentions, botOpenId);
+    // 给助手的完整名单（按消息里的顺序，含自己并标 isMe）。回复路由仍用不含自己的 mentions
+    const inboxMentions = extractMentions(msg.mentions).map((x) => (botOpenId && x.openId === botOpenId ? { ...x, isMe: true } : x));
     // 可选的同文本去重（默认关闭，见 config.dedupSameTextSeconds 的说明）
     const sameTextMs = Math.max(0, Number(d.config.dedupSameTextSeconds) || 0) * 1000;
     if (sameTextMs > 0 && msg.msgType === "text" && text) {
@@ -403,7 +413,7 @@ export function createBridge(d: BridgeDeps): Bridge {
     }
     // 斜杠命令：白名单之后、下载附件和入队之前；只拦截已登记的命令，其余照常交给助手
     if (msg.msgType === "text" && !fromBot) {
-      const slash = parseSlashCommand(text);
+      const slash = parseSlashCommand(cmdText);
       if (slash) {
         let out: string | null = null;
         try {
@@ -457,7 +467,9 @@ export function createBridge(d: BridgeDeps): Bridge {
       status: "new",
       ...(firstPath ? { filePath: firstPath } : {}),
       ...(attachments.length ? { attachments } : {}),
-      ...(mentions.length ? { mentions } : {}),
+      ...(inboxMentions.length ? { mentions: inboxMentions } : {}),
+      // 能进 inbox 就说明是在叫你（私聊，或群里 @ 了你）
+      addressedToMe: true,
       ...(fromBot ? { fromBot: true, senderName: peerName, hop } : {}),
     };
     try {
