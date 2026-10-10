@@ -1,4 +1,4 @@
-# muse-feishu-bridge 0.3.7
+# muse-feishu-bridge 0.3.8
 
 飞书 × Muse 桥接：在飞书里直接跟 Muse 聊天。企业自建应用 + WebSocket 长连接，不需要公网回调地址。
 
