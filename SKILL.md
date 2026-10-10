@@ -46,6 +46,17 @@ Muse 会在浏览器里帮你走完：
 
 白名单要填你自己的飞书 open_id：先随便填个占位把服务跑起来，然后你给机器人发任意一条消息，Muse 会从日志里拿到你真正的 open_id，帮你填好重启。
 
+## 消息处理 hook（部署时必建）
+
+inbox 里的消息不会自己处理——部署完 daemon 后必须创建一个轮询 hook（习惯名 `feishu-inbox-watch`）：
+
+- 用 `hooks.add` 注册，`script_path` 指向 `~/hooks/scripts/feishu-inbox-watch.sh`
+- **必须指定 `poll_interval_secs: 5`**（hook 允许的最小值；不指定默认 60 秒，用户发消息后要等一分钟才有回复）
+- 轮询脚本逻辑：检查 `inbox/` 有无新的 `.json`，有则原子认领（rename 为 `.json.claimed`）后 `wake` 唤醒 worker
+- worker 的 prompt 要写清：读取 claimed 文件 → 作答 → 写 `outbox/<id>.json` → 删除 claimed 文件（= 消费确认）
+- 写 outbox 必须用标准 JSON 序列化，禁止手拼 JSON 字符串；正文里的双引号、换行、反斜杠必须正确转义，否则 daemon 解析失败发不出去
+- claimed 文件 25 分钟没被消费会被重新认领重试
+
 ## 消息流（给实现 AI 后端看）
 
 - **收**：飞书 WS → daemon（message_id 持久化去重 / 白名单 / 下载图片文件）→ `inbox/<messageId>.json`
