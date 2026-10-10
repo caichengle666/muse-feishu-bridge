@@ -27,6 +27,24 @@ npm run build && npm test
 node dist/daemon.js  # 或用 keepalive.sh + cron 常驻
 ```
 
+## 不会申请机器人？让 Muse 代办
+
+没操作过飞书开放平台不用自己研究——直接在 **Muse App 里开启浏览器操作模式**，跟 Muse 说：
+
+> "帮我在飞书开放平台创建一个 Muse 机器人应用"
+
+Muse 会在浏览器里帮你走完：
+
+1. 创建企业自建应用并开启机器人能力
+2. 事件订阅选"使用长连接接收事件"，订阅 `im.message.receive_v1`
+3. 开通所需权限（`im:message`、`im:message:send_as_bot`、`im:message.group_at_msg:readonly`、`im:resource`；要卡片原地更新再加"更新应用发送的消息"）
+4. 发布应用版本
+5. 取出 App ID 和 App Secret，帮你写好 `secrets.env`（密钥只存你本地，不会外传）
+
+你只需要在登录、扫码验证这类环节接管一下浏览器。
+
+白名单要填你自己的飞书 open_id：先随便填个占位把服务跑起来，然后你给机器人发任意一条消息，Muse 会从日志里拿到你真正的 open_id，帮你填好重启。
+
 ## 外部影响
 
 - 本机主动向外建 WebSocket 长连接收飞书事件，无需公网回调地址；出网可走 HTTP 代理（`proxy` 配置）
