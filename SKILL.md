@@ -14,7 +14,7 @@
 
 - Node.js 18+
 - 飞书开放平台创建**企业自建应用**，开启机器人能力，事件订阅选"使用长连接接收事件"，订阅 `im.message.receive_v1`
-- 开通权限：`im:message`、`im:message:send_as_bot`、`im:message.group_at_msg:readonly`、`im:resource`（下载用户发的图片/文件）；要原地更新卡片再加"更新应用发送的消息"；要收其他机器人 @ 你的消息再加 `im:message.group_at_msg.include_bot:readonly` 并重新发布应用
+- 开通权限（建议一次性全开，后面再加要重新发布应用版本）：`im:message`、`im:message:send_as_bot`、`im:message.group_at_msg:readonly`、`im:resource`（下载用户发的图片/文件）、"更新应用发送的消息"（卡片原地更新）、`im:message.group_at_msg.include_bot:readonly`（备注：机器人互动——收其他机器人 @ 你的消息）
 - `config.json` 的 `allowedOpenIds` 白名单 fail-closed（为空拒绝启动）
 
 ## 部署
@@ -38,7 +38,7 @@ Muse 会在浏览器里帮你走完：
 
 1. 创建企业自建应用并开启机器人能力
 2. 事件订阅选"使用长连接接收事件"，订阅 `im.message.receive_v1`
-3. 开通所需权限：`im:message`、`im:message:send_as_bot`、`im:message.group_at_msg:readonly`、`im:resource`；要卡片原地更新再加"更新应用发送的消息"；**要跟别的机器人协作（机器人接力）必须再加 `im:message.group_at_msg.include_bot:readonly`，加完一定要重新发布应用版本，权限才会生效**
+3. 开通所需权限（一次性全开，后面再加要重新发布版本）：`im:message`、`im:message:send_as_bot`、`im:message.group_at_msg:readonly`、`im:resource`、"更新应用发送的消息"（卡片原地更新）、`im:message.group_at_msg.include_bot:readonly`（备注：机器人互动——收其他机器人 @ 你的消息）
 4. 发布应用版本
 5. 取出 App ID 和 App Secret，帮你写好 `secrets.env`（密钥只存你本地，不会外传）
 
