@@ -234,13 +234,17 @@ export function createBridge(d: BridgeDeps): Bridge {
     const res = resolveAts({ ats: p.ats, ownerOpenId: ownerOpenId || undefined, senderOpenId: r?.senderOpenId, senderName: r?.senderName, mentions: r?.mentions, peers, senderIsPeer: Boolean(r?.senderName), text: p.text });
     if (res.dropped.length) log("daemon.ats_dropped", { msgid: p.messageId, dropped: res.dropped });
     let targets = res.targets;
-    let handoff = res.peerIds.size > 0;
+    // 接力链里（本条是机器人发来的）再 @ 别人：对方多半也是机器人，只是没在本机登记；按接力处理（纯文本 + 计手数），卡片里的 @ 不触发机器人
+    const others = targets.filter((x) => x.id !== ownerOpenId && x.id !== r?.senderOpenId && !res.peerIds.has(x.id));
+    const inChain = r?.hop !== undefined; // 本条是机器人接力来的
+    let handoff = res.peerIds.size > 0 || (inChain && others.length > 0);
     let hopNote = "";
     if (handoff) {
       const outHop = (r?.hop ?? 0) + 1;
       if (outHop > botMaxHops) {
-        // 接力到上限：不再 @ 机器人，正常回复
-        targets = targets.filter((x) => !res.peerIds.has(x.id));
+        // 接力到上限：不再 @ 机器人（接力链里的其他被 @ 对象也一并去掉），正常回复
+        const drop = new Set([...res.peerIds, ...(inChain ? others.map((x) => x.id) : [])]);
+        targets = targets.filter((x) => !drop.has(x.id));
         handoff = false;
         hopNote = `\n\n（机器人接力已达 ${botMaxHops} 手上限，这次没有再 @ 机器人）`;
         log("daemon.bot_hop_limit", { msgid: p.messageId, hop: outHop, max: botMaxHops });
@@ -248,8 +252,9 @@ export function createBridge(d: BridgeDeps): Bridge {
         hopNote = `\n〔接力 ${outHop}/${botMaxHops}〕`;
       }
     }
+    const plainText = handoff;
     const firstAts = [...targets, ...ownerAts];
-    if (handoff) {
+    if (plainText) {
       // @ 机器人：整段作为一条纯文本发（对方只能收到 @ 它的那条消息；卡片里的 @ 不保证触发对方的事件）
       return {
         textChunkChars: 20_000,
