@@ -126,6 +126,7 @@ async function main(): Promise<void> {
       groupPolicy: cfg.groupPolicy || "mention",
       language: cfg.language || "zh",
       cardActionMode: "ws",
+      acceptBotMessages: Array.isArray(cfg.peerBots) && cfg.peerBots.length > 0,
       ...(cfg.proxy ? { proxy: cfg.proxy } : {}),
     },
     async (msg) => {

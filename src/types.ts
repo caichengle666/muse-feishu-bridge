@@ -41,6 +41,8 @@ export type FeishuConfig = {
   /** Bearer token required by the external notification webhook. */
   notificationWebhookToken?: string;
   language?: "zh" | "en";
+  /** 是否把其他机器人发来的消息交给上层（配置了 peerBots 时为 true） */
+  acceptBotMessages?: boolean;
   reactEmoji?: string;
   autoStart?: boolean;
   /** Feishu user open IDs allowed to run remote administrative commands. */
@@ -124,6 +126,10 @@ export type FeishuMessage = {
   parentId?: string;
   threadId?: string;
   mentions?: unknown[];
+  /** user（默认）/ bot：机器人发来的（仅当配置了 peerBots 才会转交上层） */
+  senderType?: "user" | "bot";
+  /** 机器人发送者的 App ID（若事件提供） */
+  senderAppId?: string;
   /** 飞书消息创建时间（毫秒字符串） */
   createTime?: string;
 };

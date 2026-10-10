@@ -1,4 +1,4 @@
-# muse-feishu-bridge 0.3.0
+# muse-feishu-bridge 0.3.2
 
 飞书 × Muse 桥接：在飞书里直接跟 Muse 聊天。企业自建应用 + WebSocket 长连接，不需要公网回调地址。
 
@@ -41,6 +41,9 @@ node dist/daemon.js
 | `proxy` | `auto` | `auto` 读 HTTPS_PROXY / NO_PROXY；`off` 强制直连；或填 `http://host:port` |
 | `dedupSameTextSeconds` | `0`（关） | 同发送者同文本 N 秒内只处理一次。飞书重推用同一 message_id，已默认去重；只有日志里确实看到不同 message_id 的同一条消息才打开 |
 | `ackDelaySec` | 8 | 多少秒没回复先发"处理中"状态卡（classic 下是文字"收到，正在处理"）；0 关闭 |
+| `peerBots` | 无 | 协作机器人 `[{name, appId, openId}]`，见"机器人 @ 机器人" |
+| `botMaxPerMinute` | 6 | 每会话每分钟最多接收几条机器人消息 |
+| `botMaxHops` | 3 | 机器人之间最多接力几手 |
 | `replyStyle` | `"card"` | `card`：所有回复都是状态卡片；`classic`：旧版（短回复纯文本、长回复才用卡片） |
 | `allowedFileRoots` | `<ROOT>/outgoing`、`/tmp` | 允许外发的本机文件目录 |
 | `maxDownloadMB` | 20 | 下载用户图片/文件的上限 |
@@ -55,17 +58,23 @@ inbox（daemon 写，助手读）：
   "messageId": "om_xxx", "replyTo": "om_xxx", "chatId": "oc_xxx", "chatType": "p2p",
   "senderOpenId": "ou_xxx", "msgType": "text", "text": "正文（群聊 @机器人 已去掉）",
   "attachments": [{ "kind": "image", "path": "/…/incoming/om_xxx/1-image-1.png" }],
-  "filePath": "/…/第一个附件（兼容旧字段）", "ts": "…", "status": "new"
+  "filePath": "/…/第一个附件（兼容旧字段）", "ts": "…", "status": "new",
+  "mentions": [{ "openId": "ou_zhang", "name": "张三" }],
+  "fromBot": true, "senderName": "小B", "hop": 1
 }
 ```
+
+`mentions`：消息里被 @ 的人/机器人（不含本机器人）。`fromBot`/`senderName`/`hop` 只在协作机器人发来的消息里出现。
 
 卡片点击的 `messageId` 是 `card_<哈希>`，`replyTo` 是被点的那张卡片；助手照常写 `outbox/card_<哈希>.json` 即可。
 
 outbox（助手写，**请先写临时文件再 rename**）：
 
 ```json
-{ "messageId": "om_xxx", "text": "回复正文（支持 @主人）", "file": "/…/outgoing/报告.pdf", "card": { } }
+{ "messageId": "om_xxx", "text": "回复正文（支持 @主人）", "file": "/…/outgoing/报告.pdf", "card": { }, "ats": ["张三", "ou_xxx"] }
 ```
+
+- `ats`：要真正 @ 的对象（名字或 open_id）。只允许本条消息里被 @ 的、发送者、主人、`peerBots`；其他丢弃并记日志
 
 - 长文本自动分段（每段 ≤3000 字符、代码块不会被切坏）
 - `file`：图片发图片消息；`.mp4` 发视频；其余按文件。必须在 `allowedFileRoots` 内，敏感文件（secrets.env、config.json、私钥、硬链接…）一律拒绝并告知用户
@@ -125,6 +134,25 @@ keepalive 用 pid + 进程启动时间 + 启动令牌核实身份，只会杀自
 - 更新卡片被飞书拒绝（如应用缺少"更新应用发送的消息"权限、卡片过期）→ 自动退回新发一张，不丢消息；临时错误按部件重试，不会重复。
 - 回复只有文件时，文件发出后状态卡自动变为"已完成"。
 - 想回到旧样式：config.json 里加 `"replyStyle": "classic"`。
+
+## 机器人 @ 机器人（接力）
+
+两个都跑本桥接的机器人 A、B 在同一个群里，可以互相 @ 交活。
+
+**配置（两边都要做）**
+1. 飞书开放平台 → 应用 → 权限管理，开通"获取群组中其他机器人和用户@当前机器人的消息"（`im:message.group_at_msg.include_bot:readonly`），发布新版本
+2. 在群里发 `@A /ids @B`，A 会回 B 在 A 应用里的 open_id（open_id 按应用区分，A 看到的 B 和 B 自己看到的不一样）
+3. A 的 config.json：
+   ```json
+   "peerBots": [{ "name": "B", "appId": "cli_B的AppID", "openId": "上一步查到的 ou_…" }]
+   ```
+   B 那边同理登记 A。改完重启 daemon。
+
+**规则**
+- 只接收登记过的机器人、且明确 @ 了本机器人的消息；没 @ 的（比如 B 做完后的普通回复）不处理
+- 同一会话每分钟最多接收 `botMaxPerMinute`（默认 6）条机器人消息
+- 回复里 @ 协作机器人时：整段作为一条**纯文本**发（不用卡片，保证对方收到），文末带 `〔接力 n/3〕`；每转一手 +1，到 `botMaxHops`（默认 3）后不再 @ 机器人
+- 机器人发来的斜杠命令不执行
 
 ## 斜杠命令
 

@@ -23,13 +23,14 @@ import { pruneOldFiles, errText } from "./fsutil.js";
 import { parseSlashCommand, runSlashCommand } from "./slash.js";
 import { buildReplyCard, fmtClock, fmtElapsed, type ReplyCardInput } from "./reply-card.js";
 import { isPermanentFeishuError } from "./feishu-retry.js";
+import { extractMentions, findPeer, mentionsOpenId, parseHop, resolveAts, type AtTarget } from "./mentions.js";
 import { resolveAllowedRoots } from "./files.js";
 import type { Paths } from "./paths.js";
 import type { LogFn } from "./debug.js";
 
 /** bridge 需要的 transport 能力（真实实现见 transport.ts，测试用假的）。 */
 export interface BridgeTransport {
-  replyText(messageId: string, text: string, opts?: { uuid?: string; atOpenId?: string }): Promise<void>;
+  replyText(messageId: string, text: string, opts?: { uuid?: string; atOpenId?: string; ats?: AtTarget[]; forceText?: boolean }): Promise<void>;
   replyCard(messageId: string, card: object, uuid?: string): Promise<unknown>;
   /** 原地更新一张已发出的卡片（PATCH /im/v1/messages/:id） */
   updateCard(messageId: string, card: object): Promise<void>;
@@ -64,7 +65,7 @@ export interface BridgeDeps {
 const ACK_TEXT = "收到，正在处理，稍等…";
 const TIMEOUT_UNCLAIMED_TEXT = "抱歉，这条消息等了很久都没被处理，已放弃。麻烦稍后再发一次。";
 const TIMEOUT_SLOW_TEXT = "还在处理中，比平时慢一些，完成后会直接回复在这里。";
-const SLASH_TITLES: Record<string, string> = { help: "📖 可用命令", ping: "🏓 Pong", status: "📊 桥接状态" };
+const SLASH_TITLES: Record<string, string> = { help: "📖 可用命令", ping: "🏓 Pong", status: "📊 桥接状态", ids: "🪪 open_id" };
 
 function sha(s: string): string {
   return createHash("sha256").update(s).digest("hex");
@@ -111,7 +112,13 @@ export function createBridge(d: BridgeDeps): Bridge {
   const allowedRoots = resolveAllowedRoots(d.paths.root, d.config.allowedFileRoots);
   const engine = { root: d.paths.root, allowedRoots, log, now };
   const cardMode = (d.config.replyStyle ?? "card") === "card";
-  const atId = ownerOpenId || undefined;
+  /** "@主人" 兼容映射：正文出现就替换，不主动补 */
+  const ownerAts: AtTarget[] = ownerOpenId ? [{ id: ownerOpenId, name: "主人" }] : [];
+  const peers = Array.isArray(d.config.peerBots) ? d.config.peerBots : [];
+  const botMaxPerMinute = Math.max(1, Number(d.config.botMaxPerMinute) || 6);
+  const botMaxHops = Math.max(1, Math.min(10, Number(d.config.botMaxHops) || 3));
+  /** 每个会话最近接收的机器人消息时间戳（限频） */
+  const botHits = new Map<string, number[]>();
   /** 正在发送中的"处理中"卡（回复到达时先等它发完，拿到 message_id 再原地更新） */
   const ackPending = new Map<string, Promise<void>>();
 
@@ -123,7 +130,7 @@ export function createBridge(d: BridgeDeps): Bridge {
     const r = d.routes.get(id);
     return r ? [`耗时 ${fmtElapsed(now() - r.ts)}`, fmtClock(now())] : [fmtClock(now())];
   };
-  const card = (input: ReplyCardInput) => buildReplyCard({ atOpenId: atId, ...input });
+  const card = (input: ReplyCardInput) => buildReplyCard({ ats: ownerAts, ...input });
 
   /**
    * 卡片模式下展示一张状态卡：有"处理中"卡就原地更新它，否则（或更新永久失败）新回复一张。
@@ -170,13 +177,51 @@ export function createBridge(d: BridgeDeps): Bridge {
     const replyTo = resolveReplyTo(p);
     if (!replyTo) return null;
     const t = d.transport;
+    // 解析 ats：只允许本条消息里被 @ 的、发送者、主人、协作机器人
+    const r = d.routes.get(p.messageId);
+    const res = resolveAts({ ats: p.ats, ownerOpenId: ownerOpenId || undefined, senderOpenId: r?.senderOpenId, senderName: r?.senderName, mentions: r?.mentions, peers, senderIsPeer: Boolean(r?.senderName), text: p.text });
+    if (res.dropped.length) log("daemon.ats_dropped", { msgid: p.messageId, dropped: res.dropped });
+    let targets = res.targets;
+    let handoff = res.peerIds.size > 0;
+    let hopNote = "";
+    if (handoff) {
+      const outHop = (r?.hop ?? 0) + 1;
+      if (outHop > botMaxHops) {
+        // 接力到上限：不再 @ 机器人，正常回复
+        targets = targets.filter((x) => !res.peerIds.has(x.id));
+        handoff = false;
+        hopNote = `\n\n（机器人接力已达 ${botMaxHops} 手上限，这次没有再 @ 机器人）`;
+        log("daemon.bot_hop_limit", { msgid: p.messageId, hop: outHop, max: botMaxHops });
+      } else {
+        hopNote = `\n〔接力 ${outHop}/${botMaxHops}〕`;
+      }
+    }
+    const firstAts = [...targets, ...ownerAts];
+    if (handoff) {
+      // @ 机器人：整段作为一条纯文本发（对方只能收到 @ 它的那条消息；卡片里的 @ 不保证触发对方的事件）
+      return {
+        textChunkChars: 20_000,
+        sendText: async (chunk, uuid, info) => {
+          const idx = info?.index ?? 0;
+          // 接力标记放在带 @ 的第一条：对方只收得到 @ 它的那条，标记放后面会读不到手数
+          await t.replyText(replyTo, idx === 0 ? chunk + hopNote : chunk, { uuid, ats: idx === 0 ? firstAts : ownerAts, forceText: true });
+        },
+        sendFile: async (path, uuid) => void (await t.replyLocalFile(replyTo, path, uuid)),
+        sendCard: async (c, uuid) => void (await t.replyCard(replyTo, c, uuid)),
+        notify: (text) => t.replyText(replyTo, text).catch(() => undefined),
+      };
+    }
     return {
-      sendText: async (chunk, uuid, info) => {
-        if (!cardMode) return t.replyText(replyTo, chunk, { uuid, atOpenId: atId });
+      sendText: async (chunk0, uuid, info) => {
+        const lastPart = (info?.index ?? 0) === (info?.total ?? 1) - 1;
+        const chunk = lastPart && hopNote ? chunk0 + hopNote : chunk0;
+        const ats = (info?.index ?? 0) === 0 ? firstAts : ownerAts;
+        if (!cardMode) return t.replyText(replyTo, chunk, { uuid, ats });
         const total = info?.total ?? 1;
         const idx = info?.index ?? 0;
         const c = card({
           status: "done",
+          ats,
           markdown: chunk,
           part: { index: idx + 1, total },
           footer: idx === total - 1 ? elapsedFooter(p.messageId) : [],
@@ -238,20 +283,52 @@ export function createBridge(d: BridgeDeps): Bridge {
       log("daemon.dedup", { msgid: id });
       return;
     }
-    if (!isAllowed(msg.senderOpenId)) {
+    const botOpenId = d.transport.getBotOpenId();
+    let peerName: string | undefined;
+    if (msg.senderType === "bot") {
+      // 机器人发来的：必须是登记过的协作机器人、必须 @ 了本机器人、且没超频
+      const peer = findPeer(peers, msg.senderOpenId, msg.senderAppId);
+      if (!peer) {
+        log("daemon.blocked_bot_not_peer", { sender: msg.senderOpenId, appId: msg.senderAppId, chatId: msg.chatId });
+        return;
+      }
+      if (!mentionsOpenId(msg.mentions, botOpenId)) {
+        log("daemon.blocked_bot_not_mentioned", { msgid: id, peer: peer.name });
+        return;
+      }
+      const t0 = now();
+      const hits = (botHits.get(msg.chatId) || []).filter((x) => t0 - x < 60_000);
+      if (hits.length >= botMaxPerMinute) {
+        botHits.set(msg.chatId, hits);
+        log("daemon.blocked_bot_rate", { msgid: id, peer: peer.name, perMinute: botMaxPerMinute });
+        return;
+      }
+      hits.push(t0);
+      botHits.set(msg.chatId, hits);
+      peerName = peer.name;
+    } else if (!isAllowed(msg.senderOpenId)) {
       log("daemon.blocked_not_allowed", { sender: msg.senderOpenId, chatType: msg.chatType });
       return;
     }
-    const parsed = parseMessageInput(msg, d.transport.getBotOpenId());
+    const fromBot = peerName !== undefined;
+    const parsed = parseMessageInput(msg, botOpenId);
     let text = parsed.text;
     if (msg.msgType === "text") {
       try {
         const j = JSON.parse(msg.content || "{}");
-        if (typeof j.text === "string") text = resolveMentions(j.text, msg.mentions, d.transport.getBotOpenId()).trim();
+        if (typeof j.text === "string") text = resolveMentions(j.text, msg.mentions, botOpenId).trim();
       } catch {
         /* 保留 parsed.text */
       }
     }
+    // 接力手数：用户发的 = 0；机器人发的读文末标记（没有就算第 1 手），并从正文去掉标记
+    let hop = 0;
+    if (fromBot) {
+      const h = parseHop(text);
+      text = h.text.trim();
+      hop = h.hop ?? 1;
+    }
+    const mentions = extractMentions(msg.mentions, botOpenId);
     // 可选的同文本去重（默认关闭，见 config.dedupSameTextSeconds 的说明）
     const sameTextMs = Math.max(0, Number(d.config.dedupSameTextSeconds) || 0) * 1000;
     if (sameTextMs > 0 && msg.msgType === "text" && text) {
@@ -266,7 +343,7 @@ export function createBridge(d: BridgeDeps): Bridge {
       recentText.set(key, t0);
     }
     // 斜杠命令：白名单之后、下载附件和入队之前；只拦截已登记的命令，其余照常交给助手
-    if (msg.msgType === "text") {
+    if (msg.msgType === "text" && !fromBot) {
       const slash = parseSlashCommand(text);
       if (slash) {
         let out: string | null = null;
@@ -278,6 +355,8 @@ export function createBridge(d: BridgeDeps): Bridge {
             startedAt,
             now,
             version: d.version ?? "dev",
+            senderOpenId: msg.senderOpenId,
+            mentions,
           });
         } catch (e) {
           out = `命令 /${slash.name} 执行出错：${errText(e).slice(0, 200)}`;
@@ -296,7 +375,14 @@ export function createBridge(d: BridgeDeps): Bridge {
     const attachments = await downloadAttachments(msg, parsed.attachments);
     if (!text && !attachments.length) text = `[${msg.msgType} 消息，暂不支持解析]`;
 
-    await d.routes.set(id, { replyTo: id, chatId: msg.chatId, senderOpenId: msg.senderOpenId, ts: now() });
+    await d.routes.set(id, {
+      replyTo: id,
+      chatId: msg.chatId,
+      senderOpenId: msg.senderOpenId,
+      ts: now(),
+      ...(mentions.length ? { mentions } : {}),
+      ...(fromBot ? { senderName: peerName, hop } : {}),
+    });
     const firstPath = attachments.find((a) => a.path)?.path;
     const item: InboxItem = {
       messageId: id,
@@ -310,6 +396,8 @@ export function createBridge(d: BridgeDeps): Bridge {
       status: "new",
       ...(firstPath ? { filePath: firstPath } : {}),
       ...(attachments.length ? { attachments } : {}),
+      ...(mentions.length ? { mentions } : {}),
+      ...(fromBot ? { fromBot: true, senderName: peerName, hop } : {}),
     };
     try {
       await d.backend.enqueue(item);
