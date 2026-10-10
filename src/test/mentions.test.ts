@@ -348,3 +348,17 @@ test("协作机器人 @ 本机器人时：按 appId 记下它的 open_id（只�
   await env.bridge.drain();
   assert.ok(env.t.textOpts.find((x) => x.target === "om_l6")!.opts.ats!.some((a) => a.id === "ou_peerb"));
 });
+
+test("实测问题：1号收到接力后 @ 了没登记的 2号——要发纯文本（卡片 @ 不触发机器人）并继续计手数", async () => {
+  const env = await makeEnv({ config: { ...CFG, replyStyle: "card" } });
+  const msg = botMsg("om_r1", "@_user_1 @_user_2 主人有令\n〔接力 1/3〕");
+  msg.mentions = [m("@_user_1", "本机", BOT), m("@_user_2", "2号", "ou_two")];
+  await env.bridge.onMessage(msg);
+  await writeOutbox(env, "om_r1", { text: "@2号 主人喊你", ats: ["2号"] });
+  await env.bridge.drain();
+  const s = env.t.textOpts.find((x) => x.target === "om_r1")!;
+  assert.equal(s.opts.forceText, true);
+  assert.ok(s.opts.ats!.some((a) => a.id === "ou_two"));
+  assert.match(s.text, /〔接力 2\/3〕$/);
+});
+
