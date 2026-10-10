@@ -127,7 +127,7 @@ export function validateConfig(cfg: BridgeConfig): ConfigCheck {
         if (p?.openId !== undefined && !/^ou_[A-Za-z0-9_-]+$/.test(String(p.openId))) errors.push(`peerBots[${i}].openId 应为 ou_ 开头`);
         if (p?.appId !== undefined && !/^cli_[A-Za-z0-9]+$/.test(String(p.appId))) errors.push(`peerBots[${i}].appId 应为 cli_ 开头`);
         if (p && !p.openId && !p.appId) errors.push(`peerBots[${i}] 至少要填 openId 或 appId`);
-        if (p && p.appId && !p.openId) warnings.push(`peerBots[${i}]（${p.name}）没填 openId：能收到它的消息，但回复里 @ 不了它（在群里发 "@本机器人 /ids @${p.name}" 获取）`);
+        if (p && p.appId && !p.openId) warnings.push(`peerBots[${i}]（${p.name}）没填 openId：它 @ 本机器人之后才能 @ 回它；在群里发 "@本机器人 /ids @${p.name}"，点卡片按钮即可填入`);
       });
   }
   if (cfg.botMaxPerMinute !== undefined && !isPosNum(cfg.botMaxPerMinute)) errors.push("botMaxPerMinute 必须是正数");

@@ -11,7 +11,8 @@
  *   巡检基于 inbox 文件里的时间戳，daemon 重启后依然生效（原版的计时器只在内存里）。
  */
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { FeishuCardAction, FeishuMessage } from "./types.js";
 import { MuseBackend, isSafeId, type InboxAttachment, type InboxItem } from "./muse-backend.js";
@@ -19,11 +20,11 @@ import { OutboxDrainer, OutboxStore, partUuid, type Channel, type ReplyPayload }
 import { CardEventDedupe, HeartbeatWriter, RouteStore, SeenStore } from "./state.js";
 import { makeIsAllowed, type BridgeConfig } from "./config.js";
 import { parseMessageInput } from "./messages.js";
-import { pruneOldFiles, errText } from "./fsutil.js";
+import { pruneOldFiles, errText, atomicWriteJson, SerialQueue } from "./fsutil.js";
 import { parseSlashCommand, runSlashCommand } from "./slash.js";
 import { buildReplyCard, fmtClock, fmtElapsed, type ReplyCardInput } from "./reply-card.js";
 import { isPermanentFeishuError } from "./feishu-retry.js";
-import { extractMentions, findPeer, mentionsOpenId, parseHop, resolveAts, type AtTarget } from "./mentions.js";
+import { extractMentions, findPeer, type PeerBot, mentionsOpenId, parseHop, resolveAts, type AtTarget } from "./mentions.js";
 import { resolveAllowedRoots } from "./files.js";
 import type { Paths } from "./paths.js";
 import type { LogFn } from "./debug.js";
@@ -114,7 +115,58 @@ export function createBridge(d: BridgeDeps): Bridge {
   const cardMode = (d.config.replyStyle ?? "card") === "card";
   /** "@主人" 兼容映射：正文出现就替换，不主动补 */
   const ownerAts: AtTarget[] = ownerOpenId ? [{ id: ownerOpenId, name: "主人" }] : [];
-  const peers = Array.isArray(d.config.peerBots) ? d.config.peerBots : [];
+  // 拷贝一份：学到 / 填入的 open_id 写在这份上，不改调用方传进来的对象
+  const peers: PeerBot[] = (Array.isArray(d.config.peerBots) ? d.config.peerBots : []).map((p) => ({ ...p }));
+  const configQueue = new SerialQueue();
+  const OPEN_ID_RE = /^ou_[A-Za-z0-9_-]+$/;
+  /** 协作机器人 @ 本机器人时，按 appId 认出来的：记下它在本应用里的 open_id（只在内存，不改配置文件） */
+  const rememberPeerOpenId = (peer: PeerBot, openId: string) => {
+    if (!OPEN_ID_RE.test(openId) || peer.openId === openId) return;
+    log("daemon.peer_openid_seen", { peer: peer.name, openId, old: peer.openId });
+    peer.openId = openId;
+  };
+  /** 用户在 /ids 卡片上点了"填入"：写进 config.json（已登记的补 openId，没登记的新增一条），并立即生效 */
+  const savePeerOpenId = (name: string, openId: string): Promise<"updated" | "added" | "same"> =>
+    configQueue.run(async () => {
+      if (!existsSync(d.paths.config)) throw new Error("找不到 config.json");
+      const raw = JSON.parse(await readFile(d.paths.config, "utf8")) as BridgeConfig;
+      const list = Array.isArray(raw.peerBots) ? raw.peerBots : (raw.peerBots = []);
+      const entry = list.find((x) => x && x.name === name);
+      let res: "updated" | "added" | "same";
+      if (entry) {
+        res = entry.openId === openId ? "same" : "updated";
+        entry.openId = openId;
+      } else {
+        list.push({ name, openId });
+        res = "added";
+      }
+      if (res !== "same") await atomicWriteJson(d.paths.config, raw);
+      const live = peers.find((p) => p.name === name);
+      if (live) live.openId = openId;
+      else peers.push({ name, openId });
+      log("daemon.config_peer_saved", { peer: name, openId, res });
+      return res;
+    });
+  /** /ids 卡片：列出 open_id，每个被 @ 的对象一个"填入配置"按钮 */
+  const idsCard = (out: string, ms: { openId: string; name: string }[]) => {
+    const c = card({ status: "info", title: SLASH_TITLES.ids, markdown: out }) as { body: { elements: Record<string, unknown>[] } };
+    const buttons: Record<string, unknown>[] = [];
+    for (const m of ms) {
+      if (!OPEN_ID_RE.test(m.openId) || !m.name) continue;
+      const peer = peers.find((p) => p.name === m.name);
+      if (peer && peer.openId === m.openId) continue; // 已经填好了
+      buttons.push({
+        tag: "button",
+        text: { tag: "plain_text", content: peer ? `填入 ${m.name} 的 open_id` : `登记 ${m.name} 为协作机器人` },
+        type: "primary",
+        behaviors: [{ type: "callback", value: { mfb: "peer_fill", name: m.name, openId: m.openId } }],
+      });
+    }
+    if (buttons.length) {
+      c.body.elements.splice(1, 0, { tag: "markdown", content: "要写进 config.json 吗？点按钮确认（立即生效，不用重启）：" }, ...buttons);
+    }
+    return c;
+  };
   const botMaxPerMinute = Math.max(1, Number(d.config.botMaxPerMinute) || 6);
   const botMaxHops = Math.max(1, Math.min(10, Number(d.config.botMaxHops) || 3));
   /** 每个会话最近接收的机器人消息时间戳（限频） */
@@ -306,6 +358,8 @@ export function createBridge(d: BridgeDeps): Bridge {
       hits.push(t0);
       botHits.set(msg.chatId, hits);
       peerName = peer.name;
+      // 按 appId 认出来的：顺手记下它在本应用里的 open_id，以后回复就能 @ 它
+      if (peer.appId && msg.senderAppId === peer.appId) rememberPeerOpenId(peer, msg.senderOpenId);
     } else if (!isAllowed(msg.senderOpenId)) {
       log("daemon.blocked_not_allowed", { sender: msg.senderOpenId, chatType: msg.chatType });
       return;
@@ -364,7 +418,9 @@ export function createBridge(d: BridgeDeps): Bridge {
         if (out !== null) {
           log("daemon.slash", { msgid: id, cmd: slash.name });
           const uuid = partUuid(id, "slash");
-          await (cardMode
+          await (slash.name === "ids"
+            ? d.transport.replyCard(id, idsCard(out, mentions || []), uuid) // 带按钮，经典模式也发卡片
+            : cardMode
             ? d.transport.replyCard(id, card({ status: "info", title: SLASH_TITLES[slash.name] || `/${slash.name}`, markdown: out }), uuid)
             : d.transport.replyText(id, out, { uuid })
           ).catch((e) => log("daemon.slash_reply_failed", { msgid: id, error: errText(e) }));
@@ -454,6 +510,33 @@ export function createBridge(d: BridgeDeps): Bridge {
       sha(JSON.stringify([action.messageId, from, action.value ?? null, action.formValue ?? null]));
     if (!d.cardEvents.firstSeen(key)) {
       log("daemon.card_dedup", { from });
+      return undefined;
+    }
+    // /ids 卡片上的"填入配置"按钮：桥接自己处理，不交给助手
+    const v = action.value as { mfb?: string; name?: unknown; openId?: unknown } | null;
+    if (v && v.mfb === "peer_fill") {
+      const name = String(v.name || "").trim();
+      const openId = String(v.openId || "");
+      let md: string;
+      let status: "done" | "failed" = "done";
+      if (!name || !OPEN_ID_RE.test(openId)) {
+        md = "按钮数据不对，请重新发 /ids";
+        status = "failed";
+      } else {
+        try {
+          const res = await savePeerOpenId(name, openId);
+          md =
+            res === "added"
+              ? `已把 **${name}** 登记为协作机器人，写入 config.json。\nopen_id：${openId}\n立即生效，不用重启。`
+              : `已把 **${name}** 的 open_id 写入 config.json。\nopen_id：${openId}\n立即生效，不用重启。`;
+        } catch (e) {
+          md = `写入 config.json 失败：${errText(e).slice(0, 200)}`;
+          status = "failed";
+        }
+      }
+      await d.transport
+        .updateCard(action.messageId, card({ status, title: status === "done" ? "✅ 已填入配置" : "❌ 没填进去", markdown: md }))
+        .catch((e) => log("daemon.peer_fill_card_failed", { error: errText(e) }));
       return undefined;
     }
     const id = `card_${sha(key).slice(0, 24)}`;
