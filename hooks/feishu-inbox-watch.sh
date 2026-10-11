@@ -37,12 +37,12 @@ mkdir -p "$CTX_DIR"
 BRIDGE="$HOME/workspace/muse-feishu-bridge"
 # pending 为空时不起 python（每 5 秒一次，省得白跑）
 if [ -s "$PENDING" ] && grep -q '"' "$PENDING" 2>/dev/null; then
-python3 - "$PENDING" "$SENT" "$CTX_DIR" "$MAX_TURNS" "$MAX_CHARS" "$BRIDGE" <<'PYEOF' || true
+python3 - "$PENDING" "$SENT" "$CTX_DIR" "$MAX_CHARS" "$BRIDGE" <<'PYEOF' || true
 import json, os, re, sys, time
 
 pending_path, sent_dir, ctx_dir = sys.argv[1], sys.argv[2], sys.argv[3]
-max_turns, max_chars = int(sys.argv[4]), int(sys.argv[5])
-bridge = sys.argv[6]
+max_chars = int(sys.argv[4])
+bridge = sys.argv[5]
 PENDING_TTL = 24 * 3600  # 一天还没等到回复（发送失败/过期/worker 一直崩）就放弃，防 pending 无限堆积
 
 def safe(chat):
