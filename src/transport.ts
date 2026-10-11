@@ -106,6 +106,10 @@ export class FeishuTransport {
       appSecret: this.config.appSecret,
       domain,
       loggerLevel: lark.LoggerLevel.error,
+      // 静默断线：TCP 没断但服务端已不再推送（NAT/代理超时常见）。发 ping 后 30 秒内没有任何入站帧就判定死连接、
+      // 主动断开走重连；握手 20 秒没完成也重试（默认无上限，DNS/代理卡住时会一直挂着）。
+      wsConfig: { pingTimeout: 30 },
+      handshakeTimeoutMs: 20_000,
       onReady: () => {
         this.running = true;
         ready.resolve();
@@ -154,6 +158,12 @@ export class FeishuTransport {
   }
 
   isRunning() {
+    if (!this.running) return false;
+    // SDK 自己的连接状态（重连中 / 已放弃）比回调标志更及时
+    try {
+      const st = (this.wsClient as any)?.getConnectionStatus?.()?.state;
+      if (typeof st === "string" && st !== "connected") return false;
+    } catch {}
     return this.running;
   }
 

@@ -49,7 +49,11 @@ npm ci && npm run build && npm test
 npm run onboard -- --name "<用户想要的机器人名称>"   # 后台运行，见下
 npm run check-config
 bash keepalive.sh --install-cron && bash keepalive.sh   # 常驻
+# 注册 hook（见下文「消息处理 hook」）后：
+npm run doctor   # 只读自检，全部 OK 才算部署完成；FAIL 项按提示修
 ```
+
+部署收尾：`npm run doctor` 没有 FAIL 后，请用户**关掉 Muse 网页、只用手机飞书**给机器人发一条消息，收到回复才算真的通了。
 
 `npm run onboard` 的做法（Muse 照做）：
 

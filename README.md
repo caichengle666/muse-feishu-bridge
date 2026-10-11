@@ -1,4 +1,4 @@
-# muse-feishu-bridge 0.4.0
+# muse-feishu-bridge 0.4.1
 
 飞书 × Muse 桥接：在飞书里直接跟 Muse 聊天。企业自建应用 + WebSocket 长连接，不需要公网回调地址。
 
@@ -163,7 +163,25 @@ bash keepalive.sh --uninstall-cron
 
 keepalive 用 pid + 进程启动时间 + 启动令牌核实身份，只会杀自己拉起的 daemon；自身有 flock（无 flock 时 mkdir 锁）防并发。daemon 自己也持有 `daemon.lock`，手动重复启动会被拒绝。
 
+三层保活（0.4.1）：
+
+- **hook 兜底拉起**：hook 每 5 秒轮询时顺便看心跳，超过 90 秒没更新就直接调用 `keepalive.sh`（最多每 2 分钟一次），不依赖 cron——Muse 虚拟机重启后 cron 不一定在
+- **静默断线检测**：长连接开启 ping 看门狗，发 ping 后 30 秒没有任何回应就判定死连接、主动重连；握手 20 秒超时重试。心跳的 connected 同时参考 SDK 自己的连接状态，"进程活着但收不到消息"的假活不再被当成健康
+- **积压告警**：回复在 `outbox/` 里超过 3 分钟没发出，hook 会唤醒 Muse 排查（同一故障每小时最多提醒一次）
+
+## 自检（npm run doctor）
+
+```bash
+npm run doctor
+```
+
+只读检查，不改文件、不显示密钥：Node/依赖/编译是否最新、secrets.env 权限与凭证、白名单、daemon 健康、cron、hook 脚本是否存在且指向本目录、**hook 定义是否注册并启用**（只复制脚本不会唤醒任何人）、inbox/outbox 积压、最近失败、打字机是否因缺权限回退。有 FAIL 退出码为 1。
+
+最终验收：关掉 Muse 网页，只用手机飞书给机器人发一条消息，收到回复才算真的通了。
+
 ## 排障
+
+先跑 `npm run doctor`，按 FAIL 项修。
 
 1. **收不到消息**：事件订阅是否为长连接模式、是否订阅 `im.message.receive_v1`、应用版本是否已发布
 2. **发不出消息**：看 `failed/<id>.reason.json` 里的飞书 code（如 230002 机器人不在群里、99991672 缺权限）

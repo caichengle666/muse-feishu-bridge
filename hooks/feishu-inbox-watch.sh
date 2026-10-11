@@ -35,6 +35,9 @@ MAX_BYTES="${CTX_MAX_BYTES:-524288}"  # 每个会话的上下文上限：512KB�
 CTX_TTL_DAYS=7         # 多少天没动过的历史删掉
 ARCHIVE_TTL_DAYS=30    # /clear 归档保留多少天
 HEALTH_STALE_SECS=600  # 心跳多久没更新算桥接异常（比 keepalive 的 cron 5 分钟长，先给它自愈的机会）
+HEAL_AFTER_SECS=90     # 心跳超过这么久没更新就由 hook 直接调用 keepalive.sh 拉起（不等 cron；cron 可能没装或重启后没起）
+HEAL_EVERY_SECS=120    # 两次拉起尝试的最小间隔（keepalive 自带锁，并发也安全）
+OUTBOX_STUCK_SECS=180  # outbox 里的回复超过这么久还没被 daemon 发出 = 投递卡住
 
 mkdir -p "$CTX_DIR"
 PENDING="$CTX_DIR/$NAME-pending.json"
@@ -365,6 +368,19 @@ if [ "$count" -eq 0 ]; then
   MARK="$CTX_DIR/.$NAME-health-alerted"
   now="$(date +%s)"
   issue=""
+  hb_age=999999
+  if [ -f "$HB" ]; then
+    hb_age=$((now - $(jq -r '((.ts // 0) / 1000 | floor)' "$HB" 2>/dev/null || echo 0)))
+  fi
+  # 自愈：心跳停了 90 秒就直接拉起 daemon（keepalive 自己判断健康、核实身份、带锁，健康时什么也不做）
+  HEAL_MARK="$CTX_DIR/.$NAME-heal-attempt"
+  if [ "$hb_age" -gt "$HEAL_AFTER_SECS" ] && [ -f "$BRIDGE_ROOT/keepalive.sh" ]; then
+    last_heal=$(stat -c %Y "$HEAL_MARK" 2>/dev/null || echo 0)
+    if [ $((now - last_heal)) -ge "$HEAL_EVERY_SECS" ]; then
+      touch "$HEAL_MARK"
+      setsid bash "$BRIDGE_ROOT/keepalive.sh" >/dev/null 2>&1 < /dev/null &
+    fi
+  fi
   if [ ! -f "$HB" ]; then
     issue="没有心跳文件 heartbeat.json（daemon 可能从没启动过）"
   else
@@ -378,6 +394,13 @@ if [ "$count" -eq 0 ]; then
       else
         issue="已断线 $((age / 60)) 分钟没连上（网络/代理/凭证问题）"
       fi
+    fi
+  fi
+  # 积压：daemon 活着但回复一直躺在 outbox 里没发出（投递卡住 / 飞书一直拒收）
+  if [ -z "$issue" ] && [ -d "$BRIDGE_ROOT/outbox" ]; then
+    stuck="$(find "$BRIDGE_ROOT/outbox" -maxdepth 1 -name '*.json' -mmin +$((OUTBOX_STUCK_SECS / 60)) 2>/dev/null | wc -l)"
+    if [ "${stuck:-0}" -gt 0 ]; then
+      issue="有 $stuck 条回复在 outbox 里超过 $((OUTBOX_STUCK_SECS / 60)) 分钟没发出（看 daemon.log 里 outbox/飞书错误）"
     fi
   fi
   if [ -z "$issue" ]; then
