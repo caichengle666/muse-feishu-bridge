@@ -64,7 +64,8 @@ inbox 里的消息不会自己处理——部署完 daemon 后必须创建一个
 每次 wake 都是全新的 worker，默认没有上文。轮询脚本自动维护每个 chatId 的滚动对话历史：
 
 - 认领时记下用户原文 → 回复归档到 `sent/` 后 → 追加"用户/助手"一轮到 `~/hooks/state/feishu-ctx-<chatId>.json`
-- 唤醒时把最近 10 轮（上限 8000 字）按 messageId 分开塞进 payload 的 `recent_context`
+- 唤醒时把对话历史按 messageId 分开塞进 payload 的 `recent_context`（格式 `{messageId: {summary, turns, compress_needed}}`）
+- 只按总字数限制（8000 字），不按轮数；超限时 worker 自动把最旧的几轮压缩成摘要并入 `summary`，而不是直接丢弃
 - 用户说 `/clear` 或"换个话题"时，worker 把历史文件重命名归档（保留 30 天），开始新话题
 - 历史文件 7 天没动自动删；所有 state 文件原子写入（写临时文件再 mv）
 

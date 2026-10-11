@@ -25,8 +25,7 @@ SENT="$HOME/workspace/muse-feishu-bridge/sent"
 CTX_DIR="$HOME/hooks/state"
 PENDING="$CTX_DIR/feishu-ctx-pending.json"
 STALE_SECS=1500        # 认领有效期：必须大于回复超时（config.json replyTimeoutMin=20 分钟）
-MAX_TURNS=10           # 每个 chatId 保留最近多少轮
-MAX_CHARS=8000         # 每个 chatId 历史总字数上限
+MAX_CHARS=8000         # 每个 chatId 历史总字数上限（只按字数，不按轮数）
 CTX_TTL_DAYS=7         # 多少天没动过的历史文件删掉
 ARCHIVE_TTL_DAYS=30  # 归档的话题保留 30 天
 
@@ -94,15 +93,11 @@ for mid, info in list(pending.items()):
     turns = ctx.get("turns", [])
     turns.append({"user": user_text, "assistant": reply_text,
                   "ts": int(time.time())})
-    # 只留最近 N 轮
-    turns = turns[-max_turns:]
-    # 总字数超限时从最旧的开始删（至少留 1 轮）
-    total = sum(len(t["user"]) + len(t["assistant"]) for t in turns)
-    while len(turns) > 1 and total > max_chars:
-        t = turns.pop(0)
-        total -= len(t["user"]) + len(t["assistant"])
-    save_atomic(ctx_f, {"chatId": chat, "turns": turns,
-                        "updated": int(time.time())})
+    # 只按字数判断：超限不直接删，标记为需要压缩（由 worker 用 LLM 压缩）
+    summary = ctx.get("summary", "")
+    total = len(summary) + sum(len(t["user"]) + len(t["assistant"]) for t in turns)
+    save_atomic(ctx_f, {"chatId": chat, "summary": summary, "turns": turns,
+                        "updated": int(time.time())}})
     done.append(mid)
 
 for mid in done:
@@ -214,7 +209,10 @@ for mid in sys.argv[2:]:
                      if k != mid and v.get("chatId") == chat and v.get("at", "") < me.get("at", ""))
     for _, k in earlier:
         turns.append({"user": pending[k].get("text", ""), "assistant": "（这条还在处理中，回复尚未发出）", "ts": pending[k].get("ts", 0)})
-    out[mid] = turns
+    summary = ctx.get("summary", "")
+    total = len(summary) + sum(len(t.get("user","")) + len(t.get("assistant","")) for t in turns)
+    out[mid] = {"summary": summary, "turns": turns,
+                "compress_needed": total > 8000}
 print(json.dumps(out, ensure_ascii=False))
 PYEOF
 )"
