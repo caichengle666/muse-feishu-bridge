@@ -61,13 +61,15 @@ inbox 里的消息不会自己处理——部署完 daemon 后必须创建一个
 
 ### 多轮上下文（hook 自带，无需改桥接代码）
 
-每次 wake 都是全新的 worker，默认没有上文。轮询脚本自动维护每个 chatId 的滚动对话历史：
+每次 wake 都是全新的 worker，默认没有上文。轮询脚本自动维护每个会话（chatId）的历史，**历史文件只由脚本写**：
 
-- 认领时记下用户原文 → 回复归档到 `sent/` 后 → 追加"用户/助手"一轮到 `~/hooks/state/feishu-ctx-<chatId>.json`
-- 唤醒时把对话历史按 messageId 分开塞进 payload 的 `recent_context`（格式 `{messageId: {summary, turns, compress_needed}}`）
-- 只按总字数限制（8000 字），不按轮数；超限时 worker 自动把最旧的几轮压缩成摘要并入 `summary`，而不是直接丢弃
-- 用户说 `/clear` 或"换个话题"时，worker 把历史文件重命名归档（保留 30 天），开始新话题
-- 历史文件 7 天没动自动删；所有 state 文件原子写入（写临时文件再 mv）
+- 认领时记下用户原文（附件记文件名）→ 回复归档到 `sent/` 后 → 追加一轮到 `~/hooks/state/feishu-ctx-<key>.json`
+- 唤醒时按 messageId 放进 payload 的 `recent_context`：`{messageId: {ctx_key, summary, turns, compress_needed}}`；同一会话里还没回完的前几条也会带上
+- 只按字数限制（默认 30000 字，含摘要），不按轮数。超限时给最新那条标 `compress_needed`，worker 回复完后把最旧的几轮压缩成摘要，写 `feishu-ctx-<ctx_key>.summary.json`：`{summary, upto_seq}`，脚本下一轮合并（删掉 seq ≤ upto_seq 的轮）
+- worker 一直没压缩、涨到 2 倍上限时，脚本兜底从最旧的开始丢
+- `/clear`（群里 `@机器人 /clear` 也行）：脚本认领时直接把历史归档（保留 30 天），这条和同会话更早没回完的都不进新历史；用户用自然语言说换话题时，worker 写 `feishu-ctx-<ctx_key>.clear.json`：`{messageId}`，效果相同
+- 普通历史 7 天没动自动删；state 全部原子写入；轮询脚本加了 flock，同一时刻只跑一个
+- 私聊、每个群各自一份；群里的话题和群主聊天共用一份，群里多人说话时不区分是谁
 
 ## 消息流（给实现 AI 后端看）
 
