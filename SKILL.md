@@ -48,14 +48,25 @@ Muse 会在浏览器里帮你走完：
 
 ## 消息处理 hook（部署时必建）
 
-inbox 里的消息不会自己处理——部署完 daemon 后必须创建一个轮询 hook（习惯名 `feishu-inbox-watch`）：
+inbox 里的消息不会自己处理——部署完 daemon 后必须创建一个轮询 hook（习惯名 `feishu-inbox-watch`）。
+本仓库 `hooks/` 目录已备好开箱即用的脚本和定义模板：
 
-- 用 `hooks.add` 注册，`script_path` 指向 `~/hooks/scripts/feishu-inbox-watch.sh`
+- `hooks/feishu-inbox-watch.sh` → 复制到 `~/hooks/scripts/feishu-inbox-watch.sh`
+- `hooks/feishu-inbox-watch.json` → 用 `hooks.add` 注册，把 `delivery.to` 换成用户自己的 side chat ID
 - **必须指定 `poll_interval_secs: 5`**（hook 允许的最小值；不指定默认 60 秒，用户发消息后要等一分钟才有回复）
 - 轮询脚本逻辑：检查 `inbox/` 有无新的 `.json`，有则原子认领（rename 为 `.json.claimed`）后 `wake` 唤醒 worker
 - worker 的 prompt 要写清：读取 claimed 文件 → 作答 → 写 `outbox/<id>.json` → 删除 claimed 文件（= 消费确认）
 - 写 outbox 必须用标准 JSON 序列化，禁止手拼 JSON 字符串；正文里的双引号、换行、反斜杠必须正确转义，否则 daemon 解析失败发不出去
 - claimed 文件 25 分钟没被消费会被重新认领重试
+
+### 多轮上下文（hook 自带，无需改桥接代码）
+
+每次 wake 都是全新的 worker，默认没有上文。轮询脚本自动维护每个 chatId 的滚动对话历史：
+
+- 认领时记下用户原文 → 回复归档到 `sent/` 后 → 追加"用户/助手"一轮到 `~/hooks/state/feishu-ctx-<chatId>.json`
+- 唤醒时把最近 10 轮（上限 8000 字）按 messageId 分开塞进 payload 的 `recent_context`
+- 用户说 `/clear` 或"换个话题"时，worker 把历史文件重命名归档（保留 30 天），开始新话题
+- 历史文件 7 天没动自动删；所有 state 文件原子写入（写临时文件再 mv）
 
 ## 消息流（给实现 AI 后端看）
 
