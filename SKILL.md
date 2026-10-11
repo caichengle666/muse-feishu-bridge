@@ -73,14 +73,6 @@ inbox 里的消息不会自己处理——部署完 daemon 后必须创建一个
 - 卡片点击的 inbox id 是 `card_…`，照常用这个 id 写 outbox，daemon 会回复到被点的卡片
 - 发送失败看 `failed/<id>.reason.json`
 
-## 上下文（history）
-
-- 你每次被唤醒都是新会话，**之前聊过什么只在 inbox 的 `history` 里**：按时间正序，不含本条；`role: "user"` 是对方说的，`role: "assistant"` 是你之前的回复
-- **先读 history 再答**。用户说"刚才那个""继续""上面说的"指的就是它；群聊里 `senderName` 标出是谁说的
-- 需要更早的内容，读 `historyFile`（JSONL，一行一条）
-- 没有 `history` 字段 = 这个会话第一次说话，或者用户刚发了 `/new` 清空了
-- 不要再去翻 sent/ 反推聊天内容，history 就是完整的问与答
-
 ## @ 别人 / 机器人之间接力
 
 - 登记协作机器人（0.3.5+）：在群里发 `/ids @某机器人`，会收到一张带"登记为协作机器人"按钮的卡片，点一下就同时写进 `config.json` 的 `peerBots` 并同步到运行中的 daemon，**立即生效，不用重启**（按钮只有白名单里的人点了才算数）

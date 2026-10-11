@@ -48,9 +48,6 @@ node dist/daemon.js
 | `allowedFileRoots` | `<ROOT>/outgoing`、`/tmp` | 允许外发的本机文件目录 |
 | `maxDownloadMB` | 20 | 下载用户图片/文件的上限 |
 | `domain` | `feishu` | 国际版填 `lark` |
-| `historyTurns` | 20 | 每条 inbox 带本会话最近多少轮对话；`0` 关闭上下文 |
-| `historyMaxChars` | 12000 | 带进 inbox 的历史总字数上限，超出从最旧的丢 |
-| `historyTtlDays` | 7 | 会话多少天没新消息就清掉它的历史文件 |
 
 ## inbox / outbox 格式
 
@@ -63,17 +60,9 @@ inbox（daemon 写，助手读）：
   "attachments": [{ "kind": "image", "path": "/…/incoming/om_xxx/1-image-1.png" }],
   "filePath": "/…/第一个附件（兼容旧字段）", "ts": "…", "status": "new",
   "mentions": [{ "openId": "ou_zhang", "name": "张三" }],
-  "fromBot": true, "senderName": "小B", "hop": 1,
-  "conversation": "p2p:ou_xxx",
-  "history": [
-    { "role": "user", "text": "上一条你问的", "ts": "…" },
-    { "role": "assistant", "text": "上一条助手的回复", "ts": "…" }
-  ],
-  "historyFile": "/…/history/p2p_ou_xxx.jsonl"
+  "fromBot": true, "senderName": "小B", "hop": 1
 }
 ```
-
-`history`：本会话之前的对话（时间正序，不含本条），`historyFile` 是完整记录。见下"上下文"。
 
 `mentions`：消息里被 @ 的人/机器人（不含本机器人）。`fromBot`/`senderName`/`hop` 只在协作机器人发来的消息里出现。
 
@@ -165,16 +154,6 @@ keepalive 用 pid + 进程启动时间 + 启动令牌核实身份，只会杀自
 - 回复里 @ 协作机器人时：整段作为一条**纯文本**发（不用卡片，保证对方收到），文末带 `〔接力 n/3〕`；每转一手 +1，到 `botMaxHops`（默认 3）后不再 @ 机器人
 - 机器人发来的斜杠命令不执行
 
-## 上下文（0.3.9）
-
-Muse 的 hook 每次 wake 都是全新 worker，看不到上一次聊了什么；平台也没有往 side chat 追加对话的入口。所以上下文由桥来记：
-
-- 每条入队的用户消息、每条成功发出的回复，各追加一行到 `history/<会话>.jsonl`（落盘，重启不丢；只存文字和附件路径）
-- 会话按 私聊（每人一个）/ 群 / 群里的话题 分开，互不串
-- 写 inbox 时带上最近 `historyTurns` 轮（总字数 ≤ `historyMaxChars`，单条 ≤ 2000 字，超出注明已截断），完整记录给 `historyFile`
-- 发 `/new` 清空当前会话；`historyTtlDays` 天没新消息的会话自动清掉
-- worker 那边不用改 hook prompt：它本来就读整个 inbox 文件，`history` 字段就在里面
-
 ## 斜杠命令
 
 白名单用户发送以下命令时，daemon 直接回复，不进 inbox，也不唤醒助手：
@@ -182,6 +161,5 @@ Muse 的 hook 每次 wake 都是全新 worker，看不到上一次聊了什么�
 - `/help`：列出可用命令
 - `/ping`：测试连通性
 - `/status`：长连接状态、运行时长、inbox/outbox/发送中/失败数量
-- `/new`：清空本会话的上下文，从头开始聊
 
 只拦截已登记的命令。像 `/tmp/a.log 帮我看下` 这类未登记的内容照常交给助手。新增命令请在 `src/slash.ts` 的 `COMMANDS` 里加一项。

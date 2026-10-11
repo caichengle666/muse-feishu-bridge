@@ -221,8 +221,6 @@ export interface Route {
   senderName?: string;
   /** 入站消息的接力手数（用户发的 = 0） */
   hop?: number;
-  /** 会话标识（history 用）；回复发出后按它把回复记进对应会话 */
-  convKey?: string;
 }
 
 /**
@@ -256,12 +254,6 @@ export class RouteStore {
 
   get(id: string): Route | undefined {
     return this.m.get(id);
-  }
-
-  /** 找第一条满足条件的路由（卡片点击时按状态卡 id 反查所在会话） */
-  find(pred: (r: Route) => boolean): Route | undefined {
-    for (const r of this.m.values()) if (pred(r)) return r;
-    return undefined;
   }
 
   set(id: string, r: Route): Promise<void> {
