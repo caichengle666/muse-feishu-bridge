@@ -68,6 +68,7 @@ inbox 里的消息不会自己处理——部署完 daemon 后必须创建一个
 - 只按大小限制（512KB，UTF-8 字节，含摘要），不按轮数。超限时给最新那条标 `compress_needed`，worker 回复完后把最旧的几轮压缩成摘要，写 `feishu-ctx-<ctx_key>.summary.json`：`{summary, upto_seq}`，脚本下一轮合并（删掉 seq ≤ upto_seq 的轮）
 - worker 一直没压缩、涨到 2 倍上限时，脚本兜底从最旧的开始丢
 - `/clear`（群里 `@机器人 /clear` 也行）：脚本认领时直接把历史归档（保留 30 天），这条和同会话更早没回完的都不进新历史；用户用自然语言说换话题时，worker 写 `feishu-ctx-<ctx_key>.clear.json`：`{messageId}`，效果相同
+- `/stop` 静音：用户发 `/stop` 后本聊天不再唤醒 worker，直到发 `/start` 或任意正常消息自动恢复（脚本直接处理，不经过 worker）
 - 普通历史 7 天没动自动删；state 全部原子写入；轮询脚本加了 flock，同一时刻只跑一个
 - 私聊、每个群各自一份；群里的话题和群主聊天共用一份，群里多人说话时不区分是谁
 
