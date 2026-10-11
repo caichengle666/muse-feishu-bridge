@@ -70,11 +70,21 @@ npm run doctor   # 只读自检，全部 OK 才算部署完成；FAIL 项按提�
 
 `npm run onboard` 的做法（Muse 照做）：
 
-1. 用上面第 1 项用户定的名称作为 `--name` 传入
-2. 后台运行 onboard（它会一直等扫码，最长 60 分钟），把输出写到日志；几秒后日志里会出现一条 `https://open.feishu.cn/page/launcher?...` 链接，同时生成 `onboard-qr.png`
-3. **把 `onboard-qr.png` 图片发给用户**（同时附上链接，手机上可直接点开），请用户用**手机飞书**扫码，在飞书的确认页核对名称和权限后点确认
-4. 用户确认后 onboard 自动退出并输出"成功"：App ID / Secret 已写入 `secrets.env`（600），扫码人的 open_id 已加入 `config.json` 白名单并设为主人，所需权限、长连接事件 `im.message.receive_v1`、卡片回调 `card.action.trigger` 都已开好，**不用进开发者后台、不用手动发布版本**
-5. 已有应用缺权限（如想用打字机效果但缺 `cardkit:card:write`）：`npm run onboard -- --update-permissions`，同样发二维码给用户扫一次
+1. 后台运行（它会一直等扫码，链接有效期内不退出），名称用上面第 1 项用户定的：
+
+   ```bash
+   cd ~/workspace/muse-feishu-bridge
+   nohup npm run onboard -- --name "<机器人名称>" > onboard.log 2>&1 &
+   sleep 8; grep -E "^\[onboard\] (https://|二维码图片)" onboard.log
+   ```
+
+2. 二维码和链接从日志里拿：
+   - 图片：`[onboard] 二维码图片：` 那行给的绝对路径，就是仓库根目录的 `onboard-qr.png`（`~/workspace/muse-feishu-bridge/onboard-qr.png`）
+   - 链接：`[onboard] https://` 开头那行（手机上可直接点开）
+   - 8 秒后还没有这两行，就 `cat onboard.log` 看报错（常见：没 `npm run build`、网络/代理不通）
+3. **把这张图片作为图片/文件直接发给用户**（附上链接），请用户用**手机飞书**扫码，在飞书的确认页核对名称和权限后点确认
+4. 等结果：每隔 15 秒 `tail -5 onboard.log`，直到出现 `[onboard] 成功` 或 `[onboard] 失败`；期间不要重复运行（重跑会生成新码，发给用户的旧码作废）。成功后 onboard 自动退出、删掉二维码图片，并输出"成功"：App ID / Secret 已写入 `secrets.env`（600），扫码人的 open_id 已加入 `config.json` 白名单并设为主人，所需权限、长连接事件 `im.message.receive_v1`、卡片回调 `card.action.trigger` 都已开好，**不用进开发者后台、不用手动发布版本**
+5. 已有应用缺权限（如想用打字机效果但缺 `cardkit:card:write`）：把第 1 步的 `--name "<机器人名称>"` 换成 `--update-permissions`，其余步骤一样（拿图片、发给用户扫、等成功）
 6. 输出 access_denied = 用户点了拒绝；expired = 二维码过期，重新运行即可；扫码流程用不了就走下面的手动方式
 
 ## 手动部署（扫码不可用时）
