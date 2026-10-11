@@ -179,5 +179,6 @@ Muse 的 hook 每次 wake 都是全新 worker，看不到上次聊了什么。�
   - worker 每步动手前检查自己的 `.claimed` 还在不在，不在就停下；已经执行完的步骤撤不回来
   - 历史里记成"被中断"的一轮；之后第一条新消息带 `after_stop`，worker 按新指令做、不接着做旧任务
   - 范围是整个会话（私聊或这个群），群里任何白名单成员都能中断
+- 桥接健康检查：hook 在没有新消息时顺便看 `heartbeat.json`，超过 10 分钟没更新（daemon 挂了/卡死/一直连不上，keepalive 也没救回来）就唤醒 worker（payload 带 `health_issue`），worker 先跑 keepalive 拉起、看日志修复，再报告结果；同一个故障每小时最多提醒一次，恢复后自动复位
 
 只拦截已登记的命令。像 `/tmp/a.log 帮我看下` 这类未登记的内容照常交给助手。新增命令请在 `src/slash.ts` 的 `COMMANDS` 里加一项。

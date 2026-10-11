@@ -32,6 +32,7 @@ MAX_BYTES="${CTX_MAX_BYTES:-524288}"  # 每个会话的上下文上限：512KB�
                                       # Muse Spark 1.3 窗口 1,048,576 token；512KB 中文约 17 万字
 CTX_TTL_DAYS=7         # 多少天没动过的历史删掉
 ARCHIVE_TTL_DAYS=30    # /clear 归档保留多少天
+HEALTH_STALE_SECS=600  # 心跳多久没更新算桥接异常（比 keepalive 的 cron 5 分钟长，先给它自愈的机会）
 
 mkdir -p "$CTX_DIR"
 PENDING="$CTX_DIR/$NAME-pending.json"
@@ -332,7 +333,38 @@ find "$CTX_DIR" -maxdepth 1 -name "$NAME-*.tmp.*" -mmin +10 -delete 2>/dev/null 
 
 count="${#claimed[@]}"
 if [ "$count" -eq 0 ]; then
-  silent "inbox empty" '{}'
+  # ---- 没新消息时顺便看桥接是否活着：daemon 挂了/断线时 hook 只会一直"没消息"，用户发了也没人回 ----
+  # 心跳 heartbeat.json 的 ts（毫秒）只在已连接时每 20~30 秒刷新；超过 HEALTH_STALE_SECS 没刷新 =
+  # 进程不在、卡死或一直连不上。keepalive.sh（cron 每 5 分钟）会先自己拉起，所以阈值取 10 分钟，
+  # 到这里还不好说明自愈失败了，才唤醒 worker。同一个故障只唤醒一次，之后每小时最多再提醒一次；恢复后清标记。
+  HB="$BRIDGE_ROOT/heartbeat.json"
+  MARK="$CTX_DIR/.$NAME-health-alerted"
+  now="$(date +%s)"
+  issue=""
+  if [ ! -f "$HB" ]; then
+    issue="没有心跳文件 heartbeat.json（daemon 可能从没启动过）"
+  else
+    hb_ts="$(jq -r '((.ts // 0) / 1000 | floor)' "$HB" 2>/dev/null || echo 0)"
+    hb_conn="$(jq -r '.connected // false' "$HB" 2>/dev/null || echo false)"
+    case "$hb_ts" in ''|*[!0-9]*) hb_ts=0 ;; esac
+    age=$((now - hb_ts))
+    if [ "$age" -gt "$HEALTH_STALE_SECS" ]; then
+      if [ "$hb_conn" = "true" ]; then
+        issue="心跳已 $((age / 60)) 分钟没更新（daemon 可能已退出或卡死）"
+      else
+        issue="已断线 $((age / 60)) 分钟没连上（网络/代理/凭证问题）"
+      fi
+    fi
+  fi
+  if [ -z "$issue" ]; then
+    rm -f "$MARK"
+    silent "inbox empty" '{}'
+  fi
+  if [ -f "$MARK" ] && [ $((now - $(stat -c %Y "$MARK" 2>/dev/null || echo 0))) -lt 3600 ]; then
+    silent "inbox empty; unhealthy, already alerted" '{}'
+  fi
+  touch "$MARK"
+  wake "$NAME 桥接异常：$issue" "$(jq -n -c --arg i "$issue" '{count:0,message_ids:[],health_issue:$i}')"
 fi
 
 # ---- 步骤 4：组装上下文文件 ----
