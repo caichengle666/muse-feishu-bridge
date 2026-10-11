@@ -17,6 +17,8 @@ heartbeat.json
 seen.json
 routes.json
 card_events.json
+chats.json
+stream/
 daemon.pid
 daemon.lock
 daemon.lock.stale.*

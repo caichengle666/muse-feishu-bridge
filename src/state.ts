@@ -2,10 +2,10 @@
  * state.ts — 持久化小状态：消息去重（seen.json）、心跳（heartbeat.json）、回复路由（routes.json）、
  * 卡片回调去重（card_events.json）、pid 文件（daemon.pid）。全部原子写。
  */
-import { readFile, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { readFileSync, rmSync } from "node:fs";
 import { atomicWriteJson, atomicWriteFile, SerialQueue } from "./fsutil.js";
-import { formatIdentity, isSameProcessAlive, parseIdentity, type Identity } from "./proc.js";
+import { formatIdentity, parseIdentity, type Identity } from "./proc.js";
 
 export const MAX_SEEN = 2000;
 
@@ -123,35 +123,11 @@ export function readPidFile(path: string): Identity | null {
   }
 }
 
-export async function removePidFile(path: string, id: Identity): Promise<void> {
-  try {
-    if (parseIdentity(await readFile(path, "utf8"))?.token === id.token) await rm(path, { force: true });
-  } catch {
-    /* 不存在 */
-  }
-}
-
 export function removePidFileSync(path: string, id: Identity): void {
   try {
     if (parseIdentity(readFileSync(path, "utf8"))?.token === id.token) rmSync(path, { force: true });
   } catch {
     /* ignore */
-  }
-}
-
-/**
- * 读 pid 文件，若记录的进程仍活着（pid 存在且 starttime 相同——防 pid 复用）且命令行含 daemon.js，返回其 pid。
- * 只是诊断用；真正的单实例保证是 lock.ts 的 daemon.lock。
- */
-export function livePeerDaemon(path: string, selfPid: number = process.pid): number | null {
-  const id = readPidFile(path);
-  if (!id || id.pid === selfPid) return null;
-  if (!isSameProcessAlive(id)) return null;
-  try {
-    const cmd = readFileSync(`/proc/${id.pid}/cmdline`, "utf8").replace(/\0/g, " ");
-    return /daemon\.js/.test(cmd) ? id.pid : null;
-  } catch {
-    return null;
   }
 }
 
@@ -280,5 +256,54 @@ export class RouteStore {
     if (!this.path) return Promise.resolve();
     const path = this.path;
     return this.q.run(() => atomicWriteJson(path, { routes: Object.fromEntries(this.m) })).catch(() => undefined);
+  }
+}
+
+/**
+ * 最近有消息的会话（chats.json），断线补拉只查这些会话。check-and-update 在内存里同步完成；
+ * 同一会话 1 分钟内的重复更新不落盘。
+ */
+export class ChatRegistry {
+  private chats = new Map<string, { chatType: "p2p" | "group"; lastAt: number }>();
+  private readonly q = new SerialQueue();
+
+  constructor(private readonly path: string | null, private readonly now: () => number = Date.now) {}
+
+  loadSync(): void {
+    if (!this.path) return;
+    try {
+      const raw = JSON.parse(readFileSync(this.path, "utf8")) as { chats?: Record<string, { chatType?: unknown; lastAt?: unknown }> };
+      for (const [id, v] of Object.entries(raw.chats || {})) {
+        if ((v?.chatType === "p2p" || v?.chatType === "group") && typeof v.lastAt === "number") this.chats.set(id, { chatType: v.chatType, lastAt: v.lastAt });
+      }
+    } catch {
+      /* 无文件或损坏：从空开始 */
+    }
+  }
+
+  touch(chatId: string, chatType: "p2p" | "group"): void {
+    const t = this.now();
+    const old = this.chats.get(chatId);
+    this.chats.set(chatId, { chatType, lastAt: t });
+    if (!old || old.chatType !== chatType || t - old.lastAt >= 60_000) void this.persist();
+  }
+
+  /** maxAgeMs 内有过消息的会话，最近的在前，最多 limit 个。 */
+  recent(maxAgeMs: number, limit: number): { chatId: string; chatType: "p2p" | "group" }[] {
+    const t = this.now();
+    return [...this.chats.entries()]
+      .filter(([, v]) => t - v.lastAt < maxAgeMs)
+      .sort((a, b) => b[1].lastAt - a[1].lastAt)
+      .slice(0, limit)
+      .map(([chatId, v]) => ({ chatId, chatType: v.chatType }));
+  }
+
+  persist(): Promise<void> {
+    if (!this.path) return Promise.resolve();
+    const path = this.path;
+    const cutoff = this.now() - 30 * 24 * 3600 * 1000;
+    for (const [k, v] of this.chats) if (v.lastAt < cutoff) this.chats.delete(k);
+    const snapshot = { chats: Object.fromEntries(this.chats) };
+    return this.q.run(() => atomicWriteJson(path, snapshot)).catch(() => undefined);
   }
 }

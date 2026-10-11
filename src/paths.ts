@@ -12,6 +12,7 @@ export interface Paths {
   seen: string;
   routes: string;
   cardEvents: string;
+  chats: string;
   heartbeat: string;
   pid: string;
   lock: string;
@@ -46,6 +47,7 @@ export function makePaths(root: string): Paths {
     seen: join(r, "seen.json"),
     routes: join(r, "routes.json"),
     cardEvents: join(r, "card_events.json"),
+    chats: join(r, "chats.json"),
     heartbeat: join(r, "heartbeat.json"),
     pid: join(r, "daemon.pid"),
     lock: join(r, "daemon.lock"),

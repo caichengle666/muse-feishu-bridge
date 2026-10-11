@@ -62,7 +62,7 @@ Muse 助手（被唤醒后）
 
 ```
 muse-feishu/
-  src/transport.ts 等  复用自 @caichengle/omp-feishu-lark v0.4.69（上游 AX1202/pi-feishu-lark，MIT），0.2.0 有改动
+  src/transport.ts 等  最初取自 @caichengle/omp-feishu-lark v0.4.69（上游 AX1202/pi-feishu-lark，MIT），0.5.0 已删掉桥接用不到的部分（卡片回调 webhook、OMP 后端配置、"返回 MD 原文"按钮等）
   src/muse-backend.ts  inbox/outbox 文件队列（原子写 tmp+rename，长轮询等回复）
   src/daemon.ts        主程序：配置加载、去重、白名单、消息路由
   dist/                tsc 编译产物（node 直接运行）

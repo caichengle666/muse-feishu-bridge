@@ -1,66 +1,9 @@
 import type { FeishuAttachment, FeishuMessage } from "./types.js";
 
-export type BotCommand =
-  | { name: "new" }
-  | { name: "resume" }
-  | { name: "model" }
-  | { name: "effort"; level?: string }
-  | { name: "compact"; instructions?: string }
-  | { name: "autocompact"; enabled?: string }
-  | { name: "stop" }
-  | { name: "help" }
-  | { name: "commands" }
-  | { name: "doctor" }
-  | { name: "version" }
-  | { name: "upgrade"; version?: string }
-  | { name: "setup" }
-  | { name: "status" }
-  | { name: "debug" }
-  | { name: "refresh" }
-  | { name: "config" }
-  | { name: "send"; path?: string }
-  | { name: "workspace"; path?: string }
-  | { name: "pluginStart" }
-  | { name: "pluginStop" }
-  | { name: "pluginRestart" }
-  | { name: "autostart" }
-  | { name: "skills"; enabled?: string }
-  | { name: "reset" }
-  | { name: "providerList" }
-  | { name: "providerAdd"; provider?: string }
-  | { name: "providerTest"; provider?: string }
-  | { name: "providerSync"; provider?: string }
-  | { name: "providerSyncAll" }
-  | { name: "providerRemove"; provider?: string; confirmation?: string };
-
 type PostBody = {
   title?: string;
   content?: unknown[];
 };
-
-export function normalizeForDedupe(text: string) {
-  return text.replace(/\s+/g, " ").trim();
-}
-
-export function pruneRecentMap(map: Map<string, number>, now: number, ttlMs: number) {
-  for (const [key, timestamp] of map) {
-    if (now - timestamp > ttlMs) map.delete(key);
-  }
-}
-
-export function conversationKey(msg: FeishuMessage) {
-  if (msg.chatType === "p2p") return `p2p:${msg.senderOpenId}`;
-  const threadId = msg.threadId || msg.rootId || msg.parentId;
-  if (threadId) return `group:${msg.chatId}:thread:${threadId}`;
-  if (msg.chatMode === "topic") return `group:${msg.chatId}:thread:${msg.messageId}`;
-  return `group:${msg.chatId}`;
-}
-
-export function conversationLabel(msg: FeishuMessage) {
-  if (msg.chatType === "p2p") return "[飞书私聊]";
-  if (msg.rootId || msg.parentId || msg.threadId || msg.chatMode === "topic") return "[飞书话题]";
-  return "[飞书群聊]";
-}
 
 export function parseMessageInput(msg: FeishuMessage, botOpenId?: string): { text: string; attachments: FeishuAttachment[] } {
   const attachments: FeishuAttachment[] = [];
@@ -107,60 +50,6 @@ export function parseMessageInput(msg: FeishuMessage, botOpenId?: string): { tex
     if (attachments.length) return { text: "", attachments };
   } catch {}
   return { text: msg.msgType === "text" ? msg.content : `[${msg.msgType}]`, attachments };
-}
-
-export function parseBotCommand(text: string): BotCommand | undefined {
-  const trimmed = text.trim();
-  const normalized = trimmed.replace(/\s+/g, " ");
-  const lower = normalized.toLowerCase();
-  if (lower === "/new") return { name: "new" };
-  if (lower === "/resume") return { name: "resume" };
-  if (lower === "/model") return { name: "model" };
-  const effortMatch = trimmed.match(/^\/effort(?:\s+(.+))?$/i);
-  if (effortMatch) return { name: "effort", level: effortMatch[1]?.trim() };
-  const compactMatch = trimmed.match(/^\/compact(?:\s+(.+))?$/is);
-  if (compactMatch) return { name: "compact", instructions: compactMatch[1]?.trim() };
-  const autoCompactMatch = trimmed.match(/^\/autocompact(?:\s+(on|off))?$/i);
-  if (autoCompactMatch) return { name: "autocompact", enabled: autoCompactMatch[1]?.toLowerCase() };
-  if (lower === "/stop") return { name: "stop" };
-  if (lower === "/feishu help" || lower === "/help") return { name: "help" };
-  if (lower === "/feishu commands" || lower === "/commands") return { name: "commands" };
-  if (lower === "/feishu doctor" || lower === "/doctor") return { name: "doctor" };
-  if (lower === "/feishu version" || lower === "/version") return { name: "version" };
-  if (lower === "/feishu setup") return { name: "setup" };
-  if (lower === "/feishu start") return { name: "pluginStart" };
-  if (lower === "/feishu stop") return { name: "pluginStop" };
-  if (lower === "/feishu restart") return { name: "pluginRestart" };
-  if (lower === "/feishu autostart") return { name: "autostart" };
-  const skillsMatch = trimmed.match(/^\/feishu\s+skills(?:\s+(on|off))?$/i);
-  if (skillsMatch) return { name: "skills", enabled: skillsMatch[1]?.toLowerCase() };
-  if (lower === "/feishu reset") return { name: "reset" };
-  const providerMatch = trimmed.match(/^\/feishu\s+provider(?:\s+(list|add|test|sync-all|sync|remove)(?:\s+(.+))?)?$/is);
-  if (providerMatch) {
-    const action = (providerMatch[1] || "list").toLowerCase();
-    const args = providerMatch[2]?.trim().split(/\s+/) || [];
-    if (action === "list") return { name: "providerList" };
-    if (action === "test") return { name: "providerTest", provider: args[0] };
-    if (action === "sync-all") return { name: "providerSyncAll" };
-    if (action === "sync") return { name: "providerSync", provider: args[0] };
-    if (action === "remove") return { name: "providerRemove", provider: args[0], confirmation: args[1] };
-    if (action === "add") return { name: "providerAdd", provider: providerMatch[2]?.trim() };
-  }
-  const upgradeMatch = trimmed.match(/^\/feishu\s+upgrade(?:\s+(\d+\.\d+\.\d+))?$/i);
-  if (upgradeMatch) {
-    return { name: "upgrade", version: upgradeMatch[1] };
-  }
-  if (lower === "/feishu status" || lower === "/status") return { name: "status" };
-  if (lower === "/feishu debug" || lower === "/debug") return { name: "debug" };
-  if (lower === "/feishu refresh" || lower === "/refresh") return { name: "refresh" };
-  if (lower === "/feishu config") return { name: "config" };
-  const sendMatch = trimmed.match(/^\/(?:feishu\s+)?send(?:\s+(.+))?$/is);
-  if (sendMatch) return { name: "send", path: sendMatch[1]?.trim() };
-  const workspaceMatch = trimmed.match(/^\/workspace(?:\s+(.+))?$/si);
-  if (workspaceMatch) {
-    return { name: "workspace", path: workspaceMatch[1]?.trim() };
-  }
-  return undefined;
 }
 
 function resolvePostBody(post: unknown): PostBody | undefined {

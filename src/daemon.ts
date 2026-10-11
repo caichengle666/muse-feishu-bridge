@@ -16,13 +16,15 @@ import { MuseBackend } from "./muse-backend.js";
 import { makePaths, resolveRoot } from "./paths.js";
 import { isPlaceholder, loadConfig, loadSecrets, validateConfig, type BridgeConfig } from "./config.js";
 import { debugLog, flushDebugLog, setDebugLogPath } from "./debug.js";
-import { CardEventDedupe, HeartbeatWriter, RouteStore, SeenStore, removePidFileSync, writePidFile } from "./state.js";
+import { CardEventDedupe, ChatRegistry, HeartbeatWriter, RouteStore, SeenStore, removePidFileSync, writePidFile } from "./state.js";
 import { selfIdentity } from "./proc.js";
 import { acquireInstanceLock, releaseInstanceLock } from "./lock.js";
 import { OutboxStore } from "./outbox.js";
 import { createBridge } from "./bridge.js";
 import { resolveAllowedRoots } from "./files.js";
 import { chooseProxy } from "./proxy.js";
+import { feishuCodeOf } from "./feishu-retry.js";
+import { errText } from "./fsutil.js";
 
 function pkgVersion(): string {
   try {
@@ -114,6 +116,10 @@ async function main(): Promise<void> {
   routes.loadSync();
   const cardEvents = new CardEventDedupe(paths.cardEvents);
   cardEvents.loadSync();
+  // 上一个 daemon 最后一次心跳的时刻：重启后从这里开始补拉断线期间的消息
+  const prevAliveAt = readHeartbeatTs(paths.heartbeat);
+  const chats = new ChatRegistry(paths.chats);
+  chats.loadSync();
   const heartbeat = new HeartbeatWriter(paths.heartbeat, process.pid, Date.now, self.token);
   await heartbeat.init();
 
@@ -125,12 +131,12 @@ async function main(): Promise<void> {
       domain: cfg.domain || "feishu",
       groupPolicy: cfg.groupPolicy || "mention",
       language: cfg.language || "zh",
-      cardActionMode: "ws",
       // 始终放行到上层，由 bridge 按运行中的协作机器人名单过滤（/ids 卡片登记的新机器人不用重启就能收）
       acceptBotMessages: true,
       ...(cfg.proxy ? { proxy: cfg.proxy } : {}),
     },
     async (msg) => {
+      if (msg.senderType !== "bot") chats.touch(msg.chatId, msg.chatType);
       await bridge?.onMessage(msg);
     },
     async (action) => bridge?.onCardAction(action),
@@ -145,6 +151,36 @@ async function main(): Promise<void> {
     // 仅供联调 / 测试缩短巡检周期
     sweepIntervalMs: envMs("MUSE_FEISHU_SWEEP_MS"),
   });
+
+  // 断线补拉：重启 / 重连后把最近活跃会话里断线期间的消息拉回来，走正常处理路径（已处理的按 message_id 跳过）
+  const backfillMin = cfg.backfillMinutes ?? 30;
+  let groupBackfillDenied = false;
+  const runBackfill = async (downSince: number | undefined, reason: string) => {
+    if (!backfillMin || !downSince) return;
+    const now = Date.now();
+    const since = Math.max(downSince - 60_000, now - backfillMin * 60_000);
+    let checked = 0;
+    const errors: string[] = [];
+    for (const c of chats.recent(7 * 24 * 3600_000, 20)) {
+      if (c.chatType === "group" && groupBackfillDenied) continue;
+      try {
+        checked += await transport.backfillChat(c.chatId, c.chatType, since);
+      } catch (e) {
+        const code = feishuCodeOf(e);
+        if (c.chatType === "group" && (code === 230027 || code === 99991672)) groupBackfillDenied = true;
+        errors.push(`${c.chatId}: ${errText(e)}`);
+      }
+    }
+    log("daemon.backfill", {
+      reason,
+      since: new Date(since).toISOString(),
+      downSec: Math.round((now - downSince) / 1000),
+      truncated: now - downSince > backfillMin * 60_000,
+      checked,
+      ...(errors.length ? { errors: errors.slice(0, 5) } : {}),
+    });
+  };
+  transport.onReconnected((downSince) => void runBackfill(downSince, "reconnect"));
 
   const shutdown = () => {
     log("daemon.shutdown", {});
@@ -165,6 +201,16 @@ async function main(): Promise<void> {
   bridge.startTimers();
   console.log(`muse-feishu daemon 已启动（pid ${process.pid}），飞书长连接就绪。`);
   log("daemon.started", { pid: process.pid });
+  void runBackfill(prevAliveAt, "restart");
+}
+
+function readHeartbeatTs(path: string): number | undefined {
+  try {
+    const ts = Number((JSON.parse(readFileSync(path, "utf8")) as { ts?: unknown }).ts);
+    return Number.isFinite(ts) && ts > 0 ? ts : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 main().catch(async (e: unknown) => {

@@ -5,7 +5,7 @@ import { mkdtemp, writeFile, link, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { makeEnv, textMsg, writeOutbox, waitFor, ls, readJson, sleep, httpError, FakeTransport } from "./helpers.js";
+import { makeEnv, textMsg, writeOutbox, waitFor, ls, readJson, sleep, httpError } from "./helpers.js";
 import { splitReplyText } from "../textsplit.js";
 import { FeishuApiError, assertOk, isPermanentFeishuError, isRetryableFeishuError } from "../feishu-retry.js";
 import { runDelivery, partUuid, OutboxStore, type Channel } from "../outbox.js";

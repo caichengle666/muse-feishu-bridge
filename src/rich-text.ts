@@ -43,70 +43,24 @@ export function chooseMessageMode(text: string): FeishuMessageMode {
   return "text";
 }
 
-export function buildMarkdownCard(text: string, language: "zh" | "en" = "zh") {
+export function buildMarkdownCardParts(text: string, language: "zh" | "en" = "zh"): MarkdownCardPart[] {
   const trimmed = text.trim() || "(empty response)";
   const { title, body } = extractMarkdownTitle(trimmed, language);
-  return createMarkdownCard(title, body || trimmed);
-}
-
-export function buildMarkdownCards(text: string, language: "zh" | "en" = "zh") {
-  return buildMarkdownCardParts(text, language).map((part) => part.card);
-}
-
-export function buildMarkdownCardParts(text: string, language: "zh" | "en" = "zh", copySourceId?: (index: number) => string): MarkdownCardPart[] {
-  const trimmed = text.trim() || "(empty response)";
-  const { title, body } = extractMarkdownTitle(trimmed, language);
-  const withCopyButton = Boolean(copySourceId);
-  const fullCard = createMarkdownCard(title, body || trimmed, withCopyButton ? "__copy_source_id__" : undefined);
-  if (byteSize(fullCard) < MAX_CARD_BYTES) {
-    const markdown = body || trimmed;
-    return [{ card: createMarkdownCard(title, markdown, copySourceId?.(0)), markdown }];
-  }
-
-  const parts = splitMarkdownToFit(body || trimmed, title, withCopyButton);
-  if (parts.length === 1) return [{ card: createMarkdownCard(title, parts[0], copySourceId?.(0)), markdown: parts[0] }];
+  const markdown = body || trimmed;
+  if (byteSize(createMarkdownCard(title, markdown)) < MAX_CARD_BYTES) return [{ card: createMarkdownCard(title, markdown), markdown }];
+  const parts = splitMarkdownToFit(markdown, title);
+  if (parts.length === 1) return [{ card: createMarkdownCard(title, parts[0]), markdown: parts[0] }];
   return parts.map((part, index) => ({
-    card: createMarkdownCard(`${title} (${index + 1}/${parts.length})`, part, copySourceId?.(index)),
+    card: createMarkdownCard(`${title} (${index + 1}/${parts.length})`, part),
     markdown: part,
   }));
 }
 
-function createMarkdownCard(title: string, content: string, copySourceId?: string) {
+function createMarkdownCard(title: string, content: string) {
   return {
     schema: "2.0",
-    header: {
-      title: {
-        tag: "plain_text",
-        content: title,
-      },
-      template: "blue",
-    },
-    body: {
-      elements: [
-        {
-          tag: "markdown",
-          content,
-        },
-        ...(copySourceId ? [{
-          tag: "button",
-          text: {
-            tag: "plain_text",
-            content: "返回MD原文",
-          },
-          type: "default",
-          width: "default",
-          behaviors: [
-            {
-              type: "callback",
-              value: {
-                action: "pi_feishu_copy_markdown",
-                copySourceId,
-              },
-            },
-          ],
-        }] : []),
-      ],
-    },
+    header: { title: { tag: "plain_text", content: title }, template: "blue" },
+    body: { elements: [{ tag: "markdown", content }] },
   };
 }
 
@@ -161,7 +115,7 @@ function markdownToPost(text: string, language: "zh" | "en") {
   const titleIndex = lines.findIndex((line) => line.trim());
   const firstLine = titleIndex >= 0 ? lines[titleIndex].trim() : "";
   const heading = firstLine.match(/^#{1,6}\s+(.+)$/);
-  const title = cleanInlineMarkdown(heading?.[1] || firstLine || (language === "en" ? "OMP reply" : "OMP 回复")).slice(0, 120);
+  const title = cleanInlineMarkdown(heading?.[1] || firstLine || (language === "en" ? "Muse reply" : "Muse 回复")).slice(0, 120);
   const content: PostElement[][] = [];
   let inCodeBlock = false;
 
@@ -212,10 +166,10 @@ function markdownToPost(text: string, language: "zh" | "en") {
 function extractMarkdownTitle(text: string, language: "zh" | "en") {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   const titleIndex = lines.findIndex((line) => line.trim());
-  if (titleIndex < 0) return { title: language === "en" ? "OMP reply" : "OMP 回复", body: text };
+  if (titleIndex < 0) return { title: language === "en" ? "Muse reply" : "Muse 回复", body: text };
   const firstLine = lines[titleIndex].trim();
   const heading = firstLine.match(/^#{1,6}\s+(.+)$/);
-  const title = cleanInlineMarkdown(heading?.[1] || firstLine || (language === "en" ? "OMP reply" : "OMP 回复")).slice(0, 120);
+  const title = cleanInlineMarkdown(heading?.[1] || firstLine || (language === "en" ? "Muse reply" : "Muse 回复")).slice(0, 120);
   const body = lines
     .filter((_, index) => index !== titleIndex)
     .join("\n")
@@ -223,7 +177,7 @@ function extractMarkdownTitle(text: string, language: "zh" | "en") {
   return { title, body };
 }
 
-function splitMarkdownToFit(markdown: string, title: string, withCopyButton = false) {
+function splitMarkdownToFit(markdown: string, title: string) {
   const queue = splitMarkdownBlocks(markdown);
   const parts: string[] = [];
   let current = "";
@@ -231,7 +185,7 @@ function splitMarkdownToFit(markdown: string, title: string, withCopyButton = fa
   for (const block of queue) {
     if (!block.trim()) continue;
     const candidate = current ? `${current}\n\n${block}` : block;
-    if (fitsMarkdownCard(title, candidate, withCopyButton)) {
+    if (fitsMarkdownCard(title, candidate)) {
       current = candidate;
       continue;
     }
@@ -239,11 +193,11 @@ function splitMarkdownToFit(markdown: string, title: string, withCopyButton = fa
       parts.push(current);
       current = "";
     }
-    if (fitsMarkdownCard(title, block, withCopyButton)) {
+    if (fitsMarkdownCard(title, block)) {
       current = block;
       continue;
     }
-    parts.push(...splitOversizedBlock(block, title, withCopyButton));
+    parts.push(...splitOversizedBlock(block, title));
   }
 
   if (current) parts.push(current);
@@ -274,12 +228,12 @@ function splitByHeading(markdown: string, pattern: RegExp) {
   return blocks.filter(Boolean);
 }
 
-function splitOversizedBlock(block: string, title: string, withCopyButton = false) {
+function splitOversizedBlock(block: string, title: string) {
   const parts: string[] = [];
   let current = "";
   for (const line of block.split("\n")) {
     const candidate = current ? `${current}\n${line}` : line;
-    if (fitsMarkdownCard(title, candidate, withCopyButton)) {
+    if (fitsMarkdownCard(title, candidate)) {
       current = candidate;
       continue;
     }
@@ -287,17 +241,17 @@ function splitOversizedBlock(block: string, title: string, withCopyButton = fals
       parts.push(current);
       current = "";
     }
-    if (fitsMarkdownCard(title, line, withCopyButton)) {
+    if (fitsMarkdownCard(title, line)) {
       current = line;
       continue;
     }
-    parts.push(...splitLongText(line, title, withCopyButton));
+    parts.push(...splitLongText(line, title));
   }
   if (current) parts.push(current);
   return parts;
 }
 
-function splitLongText(text: string, title: string, withCopyButton = false) {
+function splitLongText(text: string, title: string) {
   const parts: string[] = [];
   let rest = text;
   while (rest) {
@@ -306,7 +260,7 @@ function splitLongText(text: string, title: string, withCopyButton = false) {
     let best = 1;
     while (low <= high) {
       const mid = Math.floor((low + high) / 2);
-      if (fitsMarkdownCard(title, rest.slice(0, mid), withCopyButton)) {
+      if (fitsMarkdownCard(title, rest.slice(0, mid))) {
         best = mid;
         low = mid + 1;
       } else {
@@ -319,8 +273,8 @@ function splitLongText(text: string, title: string, withCopyButton = false) {
   return parts;
 }
 
-function fitsMarkdownCard(title: string, content: string, withCopyButton = false) {
-  return byteSize(createMarkdownCard(title, content, withCopyButton ? "__copy_source_id__" : undefined)) < MAX_CARD_BYTES;
+function fitsMarkdownCard(title: string, content: string) {
+  return byteSize(createMarkdownCard(title, content)) < MAX_CARD_BYTES;
 }
 
 function byteSize(value: unknown) {

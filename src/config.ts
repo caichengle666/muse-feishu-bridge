@@ -38,6 +38,11 @@ export interface BridgeConfig {
    */
   streamReplies?: boolean;
   /**
+   * 断线补拉：daemon 重启或长连接重连后，把最近 7 天有过消息的会话里、断线期间的消息拉回来补处理（已处理的按 message_id 跳过）。
+   * 最多往回补这么多分钟，默认 30；0 关闭。单聊用 im:message 权限即可，群聊还需要 im:message.group_msg。
+   */
+  backfillMinutes?: number;
+  /**
    * 协作机器人（机器人 @ 机器人接力）。登记后：
    *   - 它们在群里 @ 本机器人的消息会被接收（需在飞书开放平台开通
    *     "获取群组中其他机器人和用户@当前机器人的消息"权限 im:message.group_at_msg.include_bot:readonly）；
@@ -135,6 +140,7 @@ export function validateConfig(cfg: BridgeConfig): ConfigCheck {
         if (p && p.appId && !p.openId) warnings.push(`peerBots[${i}]（${p.name}）没填 openId：它 @ 本机器人之后才能 @ 回它；在群里发 "@本机器人 /ids @${p.name}"，点卡片按钮即可填入`);
       });
   }
+  if (cfg.backfillMinutes !== undefined && !(Number.isFinite(cfg.backfillMinutes) && cfg.backfillMinutes >= 0 && cfg.backfillMinutes <= 1440)) errors.push("backfillMinutes 须为 0–1440 的数字");
   if (cfg.botMaxPerMinute !== undefined && !isPosNum(cfg.botMaxPerMinute)) errors.push("botMaxPerMinute 必须是正数");
   if (cfg.botMaxHops !== undefined && !(Number.isInteger(cfg.botMaxHops) && cfg.botMaxHops >= 1 && cfg.botMaxHops <= 10)) errors.push("botMaxHops 须为 1–10 的整数");
   if (cfg.groupPolicy === "open") warnings.push("groupPolicy=open：群里白名单成员不 @ 机器人也会触发");

@@ -17,15 +17,6 @@ import { lstat, readdir, realpath, stat } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
 
-export type MediaType = "file" | "image" | "voice" | "video";
-
-export function detectMediaType(filename: string): MediaType {
-  const ext = filename.toLowerCase().split(".").pop() || "";
-  if (["mp4", "mov", "avi", "mkv", "wmv", "m4v"].includes(ext)) return "video";
-  if (["png", "jpg", "jpeg", "gif", "webp", "bmp"].includes(ext)) return "image";
-  if (["mp3", "wav", "amr", "m4a", "ogg", "aac"].includes(ext)) return "voice";
-  return "file";
-}
 
 const DENY_BASENAME: RegExp[] = [
   /\.env$/i,

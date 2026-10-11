@@ -1,4 +1,4 @@
-# muse-feishu-bridge 0.4.1
+# muse-feishu-bridge 0.5.0
 
 飞书 × Muse 桥接：在飞书里直接跟 Muse 聊天。企业自建应用 + WebSocket 长连接，不需要公网回调地址。
 
@@ -107,6 +107,8 @@ node dist/daemon.js
 | `allowedFileRoots` | `<ROOT>/outgoing`、`/tmp` | 允许外发的本机文件目录 |
 | `maxDownloadMB` | 20 | 下载用户图片/文件的上限 |
 | `domain` | `feishu` | 国际版填 `lark` |
+| `streamReplies` | `true` | 流式打字机，见"流式输出" |
+| `backfillMinutes` | 30 | 断线补拉最多往回补几分钟，0 关闭，见"投递保证" |
 
 ## inbox / outbox 格式
 
@@ -145,6 +147,7 @@ outbox（助手写，**请先写临时文件再 rename**）：
 - 部分成功只补发失败部分；永久错误（4xx / 业务错误码）进 `failed/`，并写 `failed/<id>.reason.json`
 - 临时错误 1 小时内同一段失败 5 次进 `failed/`
 - 崩溃后重启：`inflight/` 里的回复按进度续发
+- **断线补拉（0.5.0）**：daemon 重启或长连接重连后，把最近 7 天活跃过的会话（最多 20 个）里断线期间的消息拉回来补处理，最多往回 `backfillMinutes` 分钟；已处理过的按 message_id 跳过，不会重复回复。单聊用已有的 `im:message` 权限即可；群聊还要开通 `im:message.group_msg`（获取群组中所有消息，敏感权限，没开就只补单聊）。结果记在 debug.log 的 `daemon.backfill`
 
 ## 超时
 

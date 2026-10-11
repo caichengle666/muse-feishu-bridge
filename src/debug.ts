@@ -24,11 +24,6 @@ export function setDebugLogPath(path: string | null, opts: { maxBytes?: number }
   if (opts.maxBytes) maxBytes = opts.maxBytes;
 }
 
-/** 测试用：把日志同时交给一个回调。 */
-export function setDebugSink(fn: Sink | null): void {
-  sink = fn;
-}
-
 export function debugLog(event: string, details?: Record<string, unknown>): void {
   try {
     const safe = details ? (truncate(details) as Record<string, unknown>) : undefined;

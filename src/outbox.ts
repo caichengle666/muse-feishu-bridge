@@ -22,7 +22,7 @@ import { mkdir, readFile, readdir, rename, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { atomicWriteJson, atomicWriteFile, moveFile, errText } from "./fsutil.js";
+import { atomicWriteJson, atomicWriteFile, errText } from "./fsutil.js";
 import { splitReplyText, REPLY_CHUNK_CHARS } from "./textsplit.js";
 import { checkOutgoingFile } from "./files.js";
 import { describeFeishuError, isPermanentFeishuError } from "./feishu-retry.js";
