@@ -41,6 +41,19 @@
 
 开通或补开权限后，必须在"版本管理与发布"里发布新版本才生效。
 
+## 部署前先问用户（必须等回答再往下走）
+
+开始装之前，把下面几个选择**一条消息**发给用户，每项写明推荐项；用户回「默认」就全用推荐值。**用户没回答前不要执行任何安装命令**，选完把结果写进 `config.json` 再继续：
+
+1. **机器人名称**：建好后扫码改不了。推荐「{用户名} 的 Muse」
+2. **创建方式**：A 扫码新建应用（推荐，权限/事件/白名单全自动）；B 已有飞书应用，用户提供 App ID / Secret（缺权限再扫一次 `--update-permissions`）；C 浏览器代办，在开放平台手动建
+3. **群聊怎么回**：A 只在 @ 机器人时回（推荐，`groupPolicy: "mention"`）；B 白名单成员在群里说话都回（`"open"`）
+4. **群聊断线补拉**：A 不要，只补单聊（推荐）；B 要——得另开敏感权限 `im:message.group_msg`（获取群组中所有消息），企业管理员审核通过并发布新版本后才生效
+5. **回复样式**：A 卡片 + 打字机流式（推荐，`replyStyle: "card"`）；B 纯文本消息，没有流式（`"classic"`）
+6. **开机自启保活**：A 装 cron（推荐，`keepalive.sh --install-cron`）；B 不装，只靠 hook 兜底拉起
+
+中途遇到上面没覆盖、但会影响用户的选择（例如要覆盖已有 `secrets.env`、要换掉已有应用），同样先问再做。
+
 ## 部署（推荐：扫码建应用，0.4.0+）
 
 ```bash
@@ -48,7 +61,7 @@ git clone https://github.com/caichengle666/muse-feishu-bridge && cd muse-feishu-
 npm ci && npm run build && npm test
 npm run onboard -- --name "<用户想要的机器人名称>"   # 后台运行，见下
 npm run check-config
-bash keepalive.sh --install-cron && bash keepalive.sh   # 常驻
+bash keepalive.sh --install-cron && bash keepalive.sh   # 常驻（第 6 项选 B 就去掉 --install-cron 那半句）
 # 注册 hook（见下文「消息处理 hook」）后：
 npm run doctor   # 只读自检，全部 OK 才算部署完成；FAIL 项按提示修
 ```
@@ -57,7 +70,7 @@ npm run doctor   # 只读自检，全部 OK 才算部署完成；FAIL 项按提�
 
 `npm run onboard` 的做法（Muse 照做）：
 
-1. 先问用户机器人叫什么（建好后不能用扫码改名），作为 `--name` 传入；不问就默认「{用户名} 的 Muse」
+1. 用上面第 1 项用户定的名称作为 `--name` 传入
 2. 后台运行 onboard（它会一直等扫码，最长 60 分钟），把输出写到日志；几秒后日志里会出现一条 `https://open.feishu.cn/page/launcher?...` 链接，同时生成 `onboard-qr.png`
 3. **把 `onboard-qr.png` 图片发给用户**（同时附上链接，手机上可直接点开），请用户用**手机飞书**扫码，在飞书的确认页核对名称和权限后点确认
 4. 用户确认后 onboard 自动退出并输出"成功"：App ID / Secret 已写入 `secrets.env`（600），扫码人的 open_id 已加入 `config.json` 白名单并设为主人，所需权限、长连接事件 `im.message.receive_v1`、卡片回调 `card.action.trigger` 都已开好，**不用进开发者后台、不用手动发布版本**
