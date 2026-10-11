@@ -13,9 +13,32 @@
 ## 运行要求
 
 - Node.js 18+
-- 飞书开放平台创建**企业自建应用**，开启机器人能力，事件订阅选"使用长连接接收事件"，订阅 `im.message.receive_v1`
-- 开通权限（建议一次性全开，后面再加要重新发布应用版本）：`im:message`、`im:message:send_as_bot`、`im:message.group_at_msg:readonly`、`im:resource`（下载用户发的图片/文件）、"更新应用发送的消息"（卡片原地更新）、`im:message.group_at_msg.include_bot:readonly`（备注：机器人互动——收其他机器人 @ 你的消息）、`im:chat`（获取与更新群组信息，免审）、`im:chat:read`（查看群信息，免审）、`im:chat:readonly`（获取群组信息，免审）、`im:chat.members:read`（查看群成员）
+- 飞书开放平台创建**企业自建应用**，开启机器人能力，事件订阅选"使用长连接接收事件"，订阅 `im.message.receive_v1`；回调配置同样选长连接，订阅 `card.action.trigger`（/stop、恢复会话等卡片按钮要用，不订阅点按钮会报 200672）
+- 开通权限（建议一次性全开，后面再加要重新发布应用版本）：`im:message`、`im:message.p2p_msg:readonly`（收单聊消息）、`im:message:send_as_bot`、`im:message.group_at_msg:readonly`、`im:resource`（上传/下载图片和文件）、`im:message:update`（更新应用发送的消息，卡片原地更新）、`im:message.reactions:write_only`（收到消息先回表情）、`im:message.group_at_msg.include_bot:readonly`（机器人互动——收其他机器人 @ 你的消息）、`im:chat:readonly`（获取群组信息，免审）；可选：`im:chat`、`im:chat:read`、`im:chat.members:read`（当前代码未用到，留给以后的群管理功能）。完整清单可用下方 JSON 在"权限管理 → 批量导入"一次开通
 - `config.json` 的 `allowedOpenIds` 白名单 fail-closed（为空拒绝启动）
+
+权限批量导入 JSON（必需项；可选的 `im:chat`、`im:chat:read`、`im:chat.members:read` 需要时自己加）：
+
+```json
+{
+  "scopes": {
+    "tenant": [
+      "im:message",
+      "im:message.p2p_msg:readonly",
+      "im:message:send_as_bot",
+      "im:message.group_at_msg:readonly",
+      "im:message.group_at_msg.include_bot:readonly",
+      "im:message:update",
+      "im:message.reactions:write_only",
+      "im:resource",
+      "im:chat:readonly"
+    ],
+    "user": []
+  }
+}
+```
+
+开通或补开权限后，必须在"版本管理与发布"里发布新版本才生效。
 
 ## 部署
 
@@ -37,8 +60,8 @@ node dist/daemon.js  # 或用 keepalive.sh + cron 常驻
 Muse 会在浏览器里帮你走完：
 
 1. 创建企业自建应用并开启机器人能力
-2. 事件订阅选"使用长连接接收事件"，订阅 `im.message.receive_v1`
-3. 开通所需权限（一次性全开，后面再加要重新发布版本）：`im:message`、`im:message:send_as_bot`、`im:message.group_at_msg:readonly`、`im:resource`、"更新应用发送的消息"（卡片原地更新）、`im:message.group_at_msg.include_bot:readonly`（备注：机器人互动——收其他机器人 @ 你的消息）、`im:chat`（获取与更新群组信息，免审）、`im:chat:read`（查看群信息，免审）、`im:chat:readonly`（获取群组信息，免审）、`im:chat.members:read`（查看群成员）
+2. 事件订阅选"使用长连接接收事件"，订阅 `im.message.receive_v1`；回调配置选长连接，订阅 `card.action.trigger`（卡片按钮）
+3. 开通所需权限（一次性全开，后面再加要重新发布版本）：`im:message`、`im:message.p2p_msg:readonly`（收单聊消息）、`im:message:send_as_bot`、`im:message.group_at_msg:readonly`、`im:resource`（上传/下载图片和文件）、`im:message:update`（更新应用发送的消息，卡片原地更新）、`im:message.reactions:write_only`（收到消息先回表情）、`im:message.group_at_msg.include_bot:readonly`（机器人互动——收其他机器人 @ 你的消息）、`im:chat:readonly`（获取群组信息，免审）；可选：`im:chat`、`im:chat:read`、`im:chat.members:read`（当前代码未用到，留给以后的群管理功能）。完整清单可用下方 JSON 在"权限管理 → 批量导入"一次开通
 4. 发布应用版本
 5. 取出 App ID 和 App Secret，帮你写好 `secrets.env`（密钥只存你本地，不会外传）
 
@@ -113,5 +136,5 @@ inbox 里的消息不会自己处理——部署完 daemon 后必须创建一个
 - 消息处理逻辑（AI 后端）由部署者自己接 `inbox/`/`outbox/` 文件队列实现，本仓库只提供桥接层
 - 群聊默认只响应 @（`groupPolicy: mention`），私聊全响应
 - `secrets.env` 含应用密钥，绝不提交；外发文件白名单仅限 `outgoing/` 与 `/tmp`，拒绝 `*.env` 等敏感文件
-- 卡片原地更新需要应用有"更新应用发送的消息"权限并发布新版本；没开也能用，只是会多出一张卡
+- 卡片原地更新需要应用有"更新应用发送的消息"（`im:message:update`）权限并发布新版本；没开也能用，只是会多出一张卡
 - `allowedOpenIds` 为空拒绝启动；只放自己的 open_id

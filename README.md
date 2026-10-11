@@ -16,9 +16,36 @@
 ## 快速开始
 
 1. 在[飞书开放平台](https://open.feishu.cn/)创建企业自建应用，开启机器人能力
-2. 事件订阅选择"使用长连接接收事件"，订阅 `im.message.receive_v1`（用卡片按钮的话再订阅 `card.action.trigger`）
-3. 开通权限：`im:message`、`im:message:send_as_bot`、`im:message.group_at_msg:readonly`、`im:resource`（下载用户发的图片/文件）
-4. 发布应用版本，拿到 App ID / App Secret
+2. 事件订阅选择"使用长连接接收事件"，订阅 `im.message.receive_v1`；回调配置也选长连接，订阅 `card.action.trigger`（/stop、恢复会话等卡片按钮要用，不订阅点按钮会报 200672）
+3. 开通权限（"权限管理 → 批量导入"粘贴下面的 JSON 一次开齐）：
+   - `im:message`、`im:message.p2p_msg:readonly`：收单聊消息、发消息
+   - `im:message:send_as_bot`：以机器人身份回复
+   - `im:message.group_at_msg:readonly`：收群里 @ 机器人的消息
+   - `im:message.group_at_msg.include_bot:readonly`：收其他机器人 @ 你的消息（多机器人接力）
+   - `im:message:update`：卡片原地更新（处理中 → 已完成）
+   - `im:message.reactions:write_only`：收到消息先回表情
+   - `im:resource`：上传/下载图片和文件
+   - `im:chat:readonly`：读取群信息
+4. 发布应用版本，拿到 App ID / App Secret（以后补开权限也要重新发布版本才生效）
+
+```json
+{
+  "scopes": {
+    "tenant": [
+      "im:message",
+      "im:message.p2p_msg:readonly",
+      "im:message:send_as_bot",
+      "im:message.group_at_msg:readonly",
+      "im:message.group_at_msg.include_bot:readonly",
+      "im:message:update",
+      "im:message.reactions:write_only",
+      "im:resource",
+      "im:chat:readonly"
+    ],
+    "user": []
+  }
+}
+```
 
 ```bash
 npm install
@@ -131,7 +158,7 @@ keepalive 用 pid + 进程启动时间 + 启动令牌核实身份，只会杀自
 
 - "处理中"卡**原地更新**为最终答案（PATCH 消息），不再多出一条"收到，正在处理"。卡片 message_id 存在 `routes.json`，daemon 重启后照样更新。
 - 长回复分段时：第 1 段更新状态卡，后面每段新发一张，标题带 `（2/3）`，页脚只在最后一段。
-- 更新卡片被飞书拒绝（如应用缺少"更新应用发送的消息"权限、卡片过期）→ 自动退回新发一张，不丢消息；临时错误按部件重试，不会重复。
+- 更新卡片被飞书拒绝（如应用缺少"更新应用发送的消息" `im:message:update` 权限、卡片过期）→ 自动退回新发一张，不丢消息；临时错误按部件重试，不会重复。
 - 回复只有文件时，文件发出后状态卡自动变为"已完成"。
 - 想回到旧样式：config.json 里加 `"replyStyle": "classic"`。
 
