@@ -34,8 +34,6 @@ export interface ReplyCardInput {
   atOpenId?: string;
   /** @ 目标：正文 "@名字" 换成 @ 标签，prefix 的在开头补 */
   ats?: AtTarget[];
-  /** 卡片实体的流式模式（CardKit 打字机效果） */
-  streaming?: boolean;
 }
 
 /** 正文 markdown 组件的 element_id（CardKit 流式更新按它定位） */
@@ -54,10 +52,6 @@ export function buildReplyCard(input: ReplyCardInput): Record<string, unknown> {
     elements.push({ tag: "markdown", content: `<font color='grey'>${escapeFooter(footer)}</font>`, text_size: "notation" });
   }
   const config: Record<string, unknown> = { update_multi: true, summary: { content: summaryOf(input.markdown) || title } };
-  if (input.streaming) {
-    config.streaming_mode = true;
-    config.streaming_config = { print_frequency_ms: { default: 50 }, print_step: { default: 2 }, print_strategy: "fast" };
-  }
   return {
     schema: "2.0",
     config,

@@ -57,7 +57,7 @@ test("stream 解析：逐行拼接、坏行/半行忽略、done 标记；超长�
   assert.match(d.text, /x\n```\n\n…（内容较长/);
 });
 
-test("CardKit：处理中卡是卡片实体；流式先全量更新开流式，再逐次推全文（sequence 递增）；最终回复先关流式再全量更新", async () => {
+test("CardKit：处理中卡是卡片实体；流式先全量换卡、再 settings 打开流式，之后逐次推全文（sequence 递增）；最终回复先关流式再全量更新", async () => {
   const t = new KitTransport();
   const env = await makeEnv({ config: CFG, ackDelayMs: 10, t });
   await env.bridge.onMessage(textMsg("om_s1", "写篇文章"));
@@ -73,12 +73,10 @@ test("CardKit：处理中卡是卡片实体；流式先全量更新开流式，�
   await env.bridge.pumpStreams();
 
   const ops1 = t.kit.filter((k) => k.cardId === "card_1" && k.op !== "create");
-  assert.equal(ops1[0].op, "update");
-  assert.equal((ops1[0].arg as any).config.streaming_mode, true);
+  assert.deepEqual(ops1.slice(0, 3).map((k) => k.op), ["update", "stream_on", "text"], "先换卡，再打开流式模式，之后增量推文本");
   assert.equal(cardTitle(ops1[0].arg), "✍️ 正在输出");
   assert.equal(cardText(ops1[0].arg), "第一段。");
-  assert.equal(ops1[1].op, "text");
-  assert.equal(ops1[1].arg, "第一段。\n\n第二段。");
+  assert.equal(ops1[2].arg, "第一段。\n\n第二段。");
   assert.equal(env.routes.get("om_s1")!.cardStreaming, true);
 
   await writeOutbox(env, "om_s1", { text: "第一段。\n\n第二段。完整版" });

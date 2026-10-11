@@ -461,7 +461,8 @@ export class FeishuTransport {
   /** 打开 / 关闭卡片实体的流式模式。 */
   async setCardStreaming(cardId: string, on: boolean, sequence: number) {
     const config: Record<string, unknown> = { streaming_mode: on };
-    if (on) config.streaming_config = { print_frequency_ms: { default: 50 }, print_step: { default: 2 }, print_strategy: "fast" };
+    // delay：上一段还没打完时新内容排队接着打（fast 会把没打完的部分直接闪现，长段落看起来就是"一口气出现"）
+    if (on) config.streaming_config = { print_frequency_ms: { default: 30 }, print_step: { default: 2 }, print_strategy: "delay" };
     await withFeishuRetry(() => this.sdkClient!.cardkit.v1.card.settings({
       path: { card_id: cardId },
       data: { settings: JSON.stringify({ config }), sequence, uuid: `s_${cardId}_${sequence}` },

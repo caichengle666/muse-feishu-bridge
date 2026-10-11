@@ -470,12 +470,14 @@ export function createBridge(d: BridgeDeps): Bridge {
     const r = d.routes.get(id);
     if (!r?.cardMessageId || r.cardFinal) return;
     if (d.outbox.locate(id) !== "none" || d.outbox.runs.has(id)) return; // 最终回复到了，交给它
-    const useKit = Boolean(r.cardId && tk.updateCardEntity && tk.streamCardText);
-    const c = card({ status: "running", title: "✍️ 正在输出", markdown: text, footer: elapsedFooter(id), streaming: useKit });
+    const useKit = Boolean(r.cardId && tk.updateCardEntity && tk.streamCardText && tk.setCardStreaming);
+    const c = card({ status: "running", title: "✍️ 正在输出", markdown: text, footer: elapsedFooter(id) });
     if (useKit) {
       const md = String(((c as { body?: { elements?: { content?: string }[] } }).body?.elements?.[0]?.content) ?? text);
       if (!r.cardStreaming) {
+        // 先全量换成"正在输出"卡（带第一段），再用 settings 接口打开流式模式；之后的增量才有打字机动画
         await tk.updateCardEntity!(r.cardId!, c, await nextSeq(id));
+        await tk.setCardStreaming!(r.cardId!, true, await nextSeq(id)).catch((e) => log("daemon.stream_open_failed", { msgid: id, error: errText(e) }));
         await setRoute(id, { cardStreaming: true });
         return;
       }
