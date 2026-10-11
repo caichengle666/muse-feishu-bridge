@@ -120,7 +120,7 @@ inbox 里的消息不会自己处理——部署完 daemon 后必须创建一个
 本仓库 `hooks/` 目录已备好开箱即用的脚本和定义模板：
 
 - `hooks/feishu-inbox-watch.sh` → 复制到 `~/hooks/scripts/feishu-inbox-watch.sh`
-- `hooks/feishu-inbox-watch.json` → 用 `hooks.add` 注册，把 `delivery.to` 换成用户自己的 side chat ID
+- `hooks/feishu-inbox-watch.json` → 用 `hooks.add` 注册，把 `delivery.to` 换成用户自己的 side chat ID；定义里必须有 `created_at_ms` / `updated_at_ms`（毫秒时间戳，模板已带，直接写定义文件时改成当前时间），缺了解析失败、轮询静默不跑
 - **必须指定 `poll_interval_secs: 5`**（hook 允许的最小值；不指定默认 60 秒，用户发消息后要等一分钟才有回复）
 - 轮询脚本逻辑：检查 `inbox/` 有无新的 `.json`，有则原子认领（rename 为 `.json.claimed`）后 `wake` 唤醒 worker
 - worker 的 prompt 要写清：读取 claimed 文件 → 作答 → 写 `outbox/<id>.json` → 删除 claimed 文件（= 消费确认）
