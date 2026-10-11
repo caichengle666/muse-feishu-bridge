@@ -1,4 +1,4 @@
-# muse-feishu-bridge 0.5.0
+# muse-feishu-bridge
 
 飞书 × Muse 桥接：在飞书里直接跟 Muse 聊天。企业自建应用 + WebSocket 长连接，不需要公网回调地址。
 
@@ -11,7 +11,7 @@ https://github.com/caichengle666/muse-feishu-bridge/blob/main/SKILL.md
 请按这个 skill 帮我部署飞书桥
 ```
 
-Muse 会照着 SKILL.md 自己装依赖、编译，然后**发给你一个二维码**：用手机飞书扫一下，在飞书的确认页点确认，应用、权限、事件订阅、密钥、白名单一次全部搞定（0.4.0+，不用进开发者后台、不用发布版本）。之后 Muse 注册 hook、跑起来就能聊了。
+Muse 会照着 SKILL.md 自己装依赖、编译，然后**发给你一个二维码**：用手机飞书扫一下，在飞书的确认页点确认，应用、权限、事件订阅、密钥、白名单一次全部搞定（不用进开发者后台、不用发布版本）。之后 Muse 注册 hook、跑起来就能聊了。
 
 下面是给想自己动手或想了解原理的人看的。
 
@@ -28,7 +28,7 @@ Muse 会照着 SKILL.md 自己装依赖、编译，然后**发给你一个二维
 
 ## 快速开始
 
-### 扫码建应用（推荐，0.4.0+）
+### 扫码建应用（推荐）
 
 ```bash
 npm install && npm run build
@@ -147,7 +147,7 @@ outbox（助手写，**请先写临时文件再 rename**）：
 - 部分成功只补发失败部分；永久错误（4xx / 业务错误码）进 `failed/`，并写 `failed/<id>.reason.json`
 - 临时错误 1 小时内同一段失败 5 次进 `failed/`
 - 崩溃后重启：`inflight/` 里的回复按进度续发
-- **断线补拉（0.5.0）**：daemon 重启或长连接重连后，把最近 7 天活跃过的会话（最多 20 个）里断线期间的消息拉回来补处理，最多往回 `backfillMinutes` 分钟；已处理过的按 message_id 跳过，不会重复回复。单聊用已有的 `im:message` 权限即可；群聊还要开通 `im:message.group_msg`（获取群组中所有消息，敏感权限，没开就只补单聊）。结果记在 debug.log 的 `daemon.backfill`
+- **断线补拉**：daemon 重启或长连接重连后，把最近 7 天活跃过的会话（最多 20 个）里断线期间的消息拉回来补处理，最多往回 `backfillMinutes` 分钟；已处理过的按 message_id 跳过，不会重复回复。单聊用已有的 `im:message` 权限即可；群聊还要开通 `im:message.group_msg`（获取群组中所有消息，敏感权限，没开就只补单聊）。结果记在 debug.log 的 `daemon.backfill`
 
 ## 超时
 
@@ -166,7 +166,7 @@ bash keepalive.sh --uninstall-cron
 
 keepalive 用 pid + 进程启动时间 + 启动令牌核实身份，只会杀自己拉起的 daemon；自身有 flock（无 flock 时 mkdir 锁）防并发。daemon 自己也持有 `daemon.lock`，手动重复启动会被拒绝。
 
-三层保活（0.4.1）：
+三层保活：
 
 - **hook 兜底拉起**：hook 每 5 秒轮询时顺便看心跳，超过 90 秒没更新就直接调用 `keepalive.sh`（最多每 2 分钟一次），不依赖 cron——Muse 虚拟机重启后 cron 不一定在
 - **静默断线检测**：长连接开启 ping 看门狗，发 ping 后 30 秒没有任何回应就判定死连接、主动重连；握手 20 秒超时重试。心跳的 connected 同时参考 SDK 自己的连接状态，"进程活着但收不到消息"的假活不再被当成健康
@@ -194,10 +194,10 @@ npm run doctor
 ## 代理环境
 
 飞书 SDK 的 REST 请求走 axios，会读取 `HTTPS_PROXY` 环境变量；但长连接用的 `ws` 库**不读**代理变量。
-0.2.0 起：检测到 `HTTPS_PROXY`（或 `HTTP_PROXY` / `ALL_PROXY`）时，REST 和长连接统一走同一个 CONNECT 隧道；遵守 `NO_PROXY`。
+检测到 `HTTPS_PROXY`（或 `HTTP_PROXY` / `ALL_PROXY`）时，REST 和长连接统一走同一个 CONNECT 隧道；遵守 `NO_PROXY`。
 `config.json` 里 `"proxy": "off"` 强制直连，填 `"http://host:port"` 则覆盖环境变量。`--check-config` 会显示实际出网方式。
 
-## 流式输出（打字机效果，0.4.0）
+## 流式输出（打字机效果）
 
 长回复不用等写完才看到：助手处理中往 `stream/<messageId>.jsonl` 追加 `{"text":"一段内容\n\n"}`（每行一个 JSON，各段原样拼接），daemon 每秒把累计内容推到这条消息的状态卡上，标题变成「✍️ 正在输出」。
 
@@ -244,7 +244,7 @@ npm run doctor
 - 回复里 @ 协作机器人时：整段作为一条**纯文本**发（不用卡片，保证对方收到），文末带 `〔接力 n/3〕`；每转一手 +1，到 `botMaxHops`（默认 3）后不再 @ 机器人
 - 机器人发来的斜杠命令不执行
 
-## 消息处理 hook 与多轮上下文（0.3.12）
+## 消息处理 hook 与多轮上下文
 
 `hooks/` 里是 Muse 侧的轮询脚本和 hook 定义模板，部署步骤见 SKILL.md。
 
