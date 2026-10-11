@@ -52,6 +52,16 @@ Muse 助手（被唤醒后）
 | 19 | .mov/.avi 当 mp4 上传；文件整个读两遍；下载无大小上限 | 只有 .mp4 走 media；下载限 maxDownloadMB |
 | 20 | src/ 与 src/vendor/ 两套重复代码（vendor 也被编译） | 删除 vendor/；strict 模式编译通过 |
 
+## 0.3.9 变更：会话上下文
+
+实测确认：hook 的 wake 只有 reason + payload，每次是全新 worker；memory_search 搜不到聊天内容；平台没有往 side chat 追加 turn 的接口。原来 worker 只能翻 sent/ 里自己的回复反推，用户原文处理完就删了。
+
+- 新增 `history.ts`：按 `conversationKey()`（私聊/群/话题）把用户消息和已发出的回复追加到 `history/<会话>.jsonl`
+- inbox 新增 `conversation` / `history`（最近 `historyTurns` 轮，默认 20，总字数 ≤ `historyMaxChars`）/ `historyFile`
+- 回复在发送成功后才记（从 sent/ 读回），失败或空回复不记
+- `/new` 清空当前会话；巡检按 `historyTtlDays`（默认 7）清理旧会话；文件超 2 MB 压缩为最近 400 行
+- `historyTurns: 0` 完全关闭，行为与 0.3.8 相同
+
 ## 已知限制
 
 - 未连接真实飞书验证：media（视频）消息是否必须带封面 image_key、uuid 幂等窗口、`card.action.trigger` 的 event_id 字段位置，需联调确认

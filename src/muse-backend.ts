@@ -48,6 +48,15 @@ export interface InboxItem {
   senderName?: string;
   /** 接力手数：用户发的 = 0，机器人转来的 ≥ 1 */
   hop?: number;
+  /** 会话标识（p2p:<open_id> / group:<chat_id> / group:<chat_id>:thread:<id>），history 按它分开记 */
+  conversation?: string;
+  /**
+   * 本会话之前的对话（时间正序，不含本条）。worker 每次都是新会话，看不到上次聊了什么，
+   * 靠这个接上上下文。role=user 是对方说的，role=assistant 是你之前的回复。
+   */
+  history?: { role: "user" | "assistant"; text: string; ts: string; senderName?: string; fromBot?: boolean }[];
+  /** 本会话完整记录（JSONL）的路径，history 不够时可以自己读更早的 */
+  historyFile?: string;
 }
 
 /** inbox id 只允许安全字符（飞书 om_… / 合成的 card_…），防路径穿越。 */

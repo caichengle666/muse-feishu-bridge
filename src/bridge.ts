@@ -19,7 +19,8 @@ import { MuseBackend, isSafeId, type InboxAttachment, type InboxItem } from "./m
 import { OutboxDrainer, OutboxStore, partUuid, type Channel, type ReplyPayload } from "./outbox.js";
 import { CardEventDedupe, HeartbeatWriter, RouteStore, SeenStore } from "./state.js";
 import { makeIsAllowed, type BridgeConfig } from "./config.js";
-import { parseMessageInput } from "./messages.js";
+import { conversationKey, parseMessageInput } from "./messages.js";
+import { HistoryStore, type HistoryEntry } from "./history.js";
 import { pruneOldFiles, errText, atomicWriteJson, SerialQueue } from "./fsutil.js";
 import { parseSlashCommand, runSlashCommand } from "./slash.js";
 import { buildReplyCard, fmtClock, fmtElapsed, type ReplyCardInput } from "./reply-card.js";
@@ -66,7 +67,7 @@ export interface BridgeDeps {
 const ACK_TEXT = "收到，正在处理，稍等…";
 const TIMEOUT_UNCLAIMED_TEXT = "抱歉，这条消息等了很久都没被处理，已放弃。麻烦稍后再发一次。";
 const TIMEOUT_SLOW_TEXT = "还在处理中，比平时慢一些，完成后会直接回复在这里。";
-const SLASH_TITLES: Record<string, string> = { help: "📖 可用命令", ping: "🏓 Pong", status: "📊 桥接状态", ids: "🪪 open_id" };
+const SLASH_TITLES: Record<string, string> = { help: "📖 可用命令", ping: "🏓 Pong", status: "📊 桥接状态", ids: "🪪 open_id", new: "🧹 新会话" };
 
 function sha(s: string): string {
   return createHash("sha256").update(s).digest("hex");
@@ -116,6 +117,38 @@ export function createBridge(d: BridgeDeps): Bridge {
   const allowedRoots = resolveAllowedRoots(d.paths.root, d.config.allowedFileRoots);
   const engine = { root: d.paths.root, allowedRoots, log, now };
   const cardMode = (d.config.replyStyle ?? "card") === "card";
+  const history = new HistoryStore(d.paths.history, {
+    turns: d.config.historyTurns ?? 20,
+    maxChars: d.config.historyMaxChars ?? 12_000,
+    maxEntryChars: 2000,
+    ttlMs: (d.config.historyTtlDays ?? 7) * 24 * 3600_000,
+    now,
+  });
+  const recordHistory = (key: string | undefined, e: HistoryEntry) => {
+    if (!key || !history.enabled) return Promise.resolve();
+    return history.append(key, e).catch((err) => log("daemon.history_write_failed", { error: errText(err) }));
+  };
+  /** inbox 里的 history / historyFile 字段 */
+  const historyFields = async (key: string, excludeId: string) => {
+    if (!history.enabled) return {};
+    const items = await history.recent(key, excludeId).catch(() => [] as HistoryEntry[]);
+    const has = items.length > 0 || (await history.has(key));
+    return {
+      conversation: key,
+      ...(items.length
+        ? {
+            history: items.map((e) => ({
+              role: e.role,
+              text: e.text,
+              ts: e.ts,
+              ...(e.senderName ? { senderName: e.senderName } : {}),
+              ...(e.fromBot ? { fromBot: true } : {}),
+            })),
+          }
+        : {}),
+      ...(has ? { historyFile: history.fileFor(key) } : {}),
+    };
+  };
   /** "@主人" 兼容映射：正文出现就替换，不主动补 */
   const ownerAts: AtTarget[] = ownerOpenId ? [{ id: ownerOpenId, name: "主人" }] : [];
   // 拷贝一份：学到 / 填入的 open_id 写在这份上，不改调用方传进来的对象
@@ -429,6 +462,8 @@ export function createBridge(d: BridgeDeps): Bridge {
             version: d.version ?? "dev",
             senderOpenId: msg.senderOpenId,
             mentions,
+            historyEnabled: history.enabled,
+            clearHistory: () => history.clear(conversationKey(msg)),
           });
         } catch (e) {
           out = `命令 /${slash.name} 执行出错：${errText(e).slice(0, 200)}`;
@@ -449,10 +484,12 @@ export function createBridge(d: BridgeDeps): Bridge {
     const attachments = await downloadAttachments(msg, parsed.attachments);
     if (!text && !attachments.length) text = `[${msg.msgType} 消息，暂不支持解析]`;
 
+    const convKey = conversationKey(msg);
     await d.routes.set(id, {
       replyTo: id,
       chatId: msg.chatId,
       senderOpenId: msg.senderOpenId,
+      convKey,
       ts: now(),
       ...(mentions.length ? { mentions } : {}),
       ...(fromBot ? { senderName: peerName, hop } : {}),
@@ -474,6 +511,7 @@ export function createBridge(d: BridgeDeps): Bridge {
       // 私聊，或群里 @ 了本机器人 = 在叫你；groupPolicy=open 时没 @ 的群消息也会进来，那时为 false
       addressedToMe: msg.chatType === "p2p" || mentionsOpenId(msg.mentions, botOpenId),
       ...(fromBot ? { fromBot: true, senderName: peerName, hop } : {}),
+      ...(await historyFields(convKey, id)),
     };
     try {
       await d.backend.enqueue(item);
@@ -490,6 +528,15 @@ export function createBridge(d: BridgeDeps): Bridge {
     }
     waiting.set(id, { at: now(), replyTo: id });
     log("daemon.enqueued", { msgid: id, type: msg.msgType, attachments: attachments.length });
+    const attNote = attachments.map((a) => (a.path ? `[${a.kind === "image" ? "图片" : a.kind === "audio" ? "语音" : "文件"}: ${a.path}]` : `[${a.kind} 下载失败]`)).join(" ");
+    await recordHistory(convKey, {
+      role: "user",
+      text: [text, attNote].filter(Boolean).join("\n"),
+      ts: item.ts,
+      messageId: id,
+      senderOpenId: msg.senderOpenId,
+      ...(fromBot ? { senderName: peerName, fromBot: true } : msg.chatType !== "p2p" && msg.senderOpenId === ownerOpenId ? { senderName: "主人" } : {}),
+    });
 
     if (ackDelayMs > 0) {
       const t = setTimeout(() => {
@@ -560,7 +607,12 @@ export function createBridge(d: BridgeDeps): Bridge {
       return undefined;
     }
     const id = `card_${sha(key).slice(0, 24)}`;
-    await d.routes.set(id, { replyTo: action.messageId, chatId: action.chatId || "", senderOpenId: from, ts: now() });
+    // 被点的卡片是哪个会话发出的：按状态卡 id / 回复目标反查；查不到就按群（或私聊）算
+    const owner = d.routes.find((r) => r.cardMessageId === action.messageId || r.replyTo === action.messageId);
+    const convKey = owner?.convKey || (action.chatId ? `group:${action.chatId}` : undefined);
+    await d.routes.set(id, { replyTo: action.messageId, chatId: action.chatId || "", senderOpenId: from, ts: now(), ...(convKey ? { convKey } : {}) });
+    const cardText = `[卡片点击] value=${JSON.stringify(action.value ?? null).slice(0, 1000)}`;
+    const cardTs = new Date(now()).toISOString();
     await d.backend.enqueue({
       messageId: id,
       replyTo: action.messageId,
@@ -568,13 +620,15 @@ export function createBridge(d: BridgeDeps): Bridge {
       chatType: "unknown",
       senderOpenId: from,
       msgType: "card_action",
-      text: `[卡片点击] value=${JSON.stringify(action.value ?? null).slice(0, 1000)}`,
+      text: cardText,
       cardValue: action.value ?? null,
       ...(action.formValue ? { cardFormValue: action.formValue } : {}),
-      ts: new Date(now()).toISOString(),
+      ts: cardTs,
       status: "new",
+      ...(convKey ? await historyFields(convKey, id) : {}),
     });
     waiting.set(id, { at: now(), replyTo: action.messageId });
+    await recordHistory(convKey, { role: "user", text: cardText, ts: cardTs, messageId: id, senderOpenId: from });
     log("daemon.card_enqueued", { id, from });
     return undefined;
   }
@@ -615,6 +669,7 @@ export function createBridge(d: BridgeDeps): Bridge {
     const age = d.pruneMaxAgeMs ?? 7 * 24 * 3600_000;
     for (const dir of [d.paths.sent, d.paths.expired, d.paths.failed]) await pruneOldFiles(dir, age, t);
     await pruneIncoming(age, t);
+    await history.prune(t).catch(() => undefined);
   }
 
   async function pruneIncoming(age: number, t: number): Promise<void> {
@@ -660,6 +715,24 @@ export function createBridge(d: BridgeDeps): Bridge {
     }
   }
 
+  /** 回复发出后记进会话历史（从 sent/ 读回原文，和用户看到的一致） */
+  async function recordReply(id: string): Promise<void> {
+    if (!history.enabled) return;
+    const key = d.routes.get(id)?.convKey;
+    if (!key) return;
+    try {
+      const p = JSON.parse(await readFile(join(d.paths.sent, `${id}.json`), "utf8")) as { text?: unknown; file?: unknown; card?: unknown };
+      const parts: string[] = [];
+      if (typeof p.text === "string" && p.text.trim()) parts.push(p.text.trim());
+      if (typeof p.file === "string" && p.file) parts.push(`[发送文件: ${basename(p.file)}]`);
+      if (p.card && !parts.length) parts.push("[发送了一张卡片]");
+      if (!parts.length) return;
+      await recordHistory(key, { role: "assistant", text: parts.join("\n"), ts: new Date(now()).toISOString(), messageId: id });
+    } catch (e) {
+      log("daemon.history_reply_failed", { msgid: id, error: errText(e) });
+    }
+  }
+
   async function drainOnce() {
     const r = await drainer.drain();
     for (const id of [...r.sent, ...r.failed, ...r.expired]) {
@@ -667,6 +740,7 @@ export function createBridge(d: BridgeDeps): Bridge {
       waiting.delete(id);
     }
     if (cardMode) await finalizeCards(r.sent, r.failed);
+    for (const id of r.sent) await recordReply(id);
     return r;
   }
 

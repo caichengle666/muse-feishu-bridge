@@ -12,6 +12,7 @@ sent/
 failed/
 expired/
 incoming/
+history/
 outgoing/
 heartbeat.json
 seen.json

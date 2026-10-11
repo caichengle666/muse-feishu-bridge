@@ -25,6 +25,7 @@ export interface Paths {
   expired: string;
   incoming: string;
   outgoing: string;
+  history: string;
 }
 
 export function resolveRoot(env: NodeJS.ProcessEnv = process.env, moduleUrl: string = import.meta.url): string {
@@ -55,5 +56,6 @@ export function makePaths(root: string): Paths {
     expired: join(r, "expired"),
     incoming: join(r, "incoming"),
     outgoing: join(r, "outgoing"),
+    history: join(r, "history"),
   };
 }

@@ -29,6 +29,10 @@ export interface SlashContext {
   /** /ids 用：发送者 open_id、消息里被 @ 的人/机器人（不含本机器人） */
   senderOpenId?: string;
   mentions?: { openId: string; name: string }[];
+  /** /new 用：清空当前会话的历史，返回 false = 本来就没有 */
+  clearHistory?: () => Promise<boolean>;
+  /** 历史功能是否开启 */
+  historyEnabled?: boolean;
 }
 
 async function count(dir: string): Promise<number> {
@@ -62,6 +66,13 @@ const COMMANDS: Record<string, { desc: string; run: Handler }> = {
         ...((ctx.mentions || []).length ? [] : ["（在命令后面 @ 要查的人或机器人）"]),
 
       ].join("\n"),
+  },
+  new: {
+    desc: "清空本会话的上下文，从头开始聊",
+    run: async (ctx) => {
+      if (!ctx.historyEnabled || !ctx.clearHistory) return "上下文功能已关闭（historyTurns = 0），每条消息本来就是独立处理的。";
+      return (await ctx.clearHistory()) ? "已清空本会话的上下文，接下来从头开始。" : "本会话还没有上下文记录，不用清。";
+    },
   },
   status: {
     desc: "查看桥接状态",

@@ -1,9 +1,14 @@
 {
-  "allowedOpenIds": ["ou_xxx"],
+  "allowedOpenIds": [
+    "ou_xxx"
+  ],
   "ownerOpenId": "ou_xxx",
   "replyTimeoutMin": 20,
   "groupPolicy": "mention",
   "ackDelaySec": 8,
   "proxy": "auto",
-  "dedupSameTextSeconds": 0
+  "dedupSameTextSeconds": 0,
+  "historyTurns": 20,
+  "historyMaxChars": 12000,
+  "historyTtlDays": 7
 }

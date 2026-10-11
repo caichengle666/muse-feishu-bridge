@@ -46,6 +46,12 @@ export interface BridgeConfig {
   botMaxHops?: number;
   /** 下载用户发来的图片/文件的大小上限（MB），默认 20。 */
   maxDownloadMB?: number;
+  /** 每条 inbox 带本会话最近多少轮对话（history 字段），默认 20；0 = 关闭 */
+  historyTurns?: number;
+  /** 带进 inbox 的历史总字数上限，默认 12000 */
+  historyMaxChars?: number;
+  /** 会话多少天没新消息就清掉历史文件，默认 7 */
+  historyTtlDays?: number;
 }
 
 export function parseEnvFile(text: string): Record<string, string> {
@@ -132,6 +138,9 @@ export function validateConfig(cfg: BridgeConfig): ConfigCheck {
   }
   if (cfg.botMaxPerMinute !== undefined && !isPosNum(cfg.botMaxPerMinute)) errors.push("botMaxPerMinute 必须是正数");
   if (cfg.botMaxHops !== undefined && !(Number.isInteger(cfg.botMaxHops) && cfg.botMaxHops >= 1 && cfg.botMaxHops <= 10)) errors.push("botMaxHops 须为 1–10 的整数");
+  if (cfg.historyTurns !== undefined && !(Number.isInteger(cfg.historyTurns) && cfg.historyTurns >= 0 && cfg.historyTurns <= 200)) errors.push("historyTurns 须为 0–200 的整数（0 = 关闭）");
+  if (cfg.historyMaxChars !== undefined && !(Number.isInteger(cfg.historyMaxChars) && cfg.historyMaxChars >= 500 && cfg.historyMaxChars <= 200_000)) errors.push("historyMaxChars 须为 500–200000 的整数");
+  if (cfg.historyTtlDays !== undefined && !isPosNum(cfg.historyTtlDays)) errors.push("historyTtlDays 必须是正数");
   if (cfg.groupPolicy === "open") warnings.push("groupPolicy=open：群里白名单成员不 @ 机器人也会触发");
   return { errors, warnings };
 }
