@@ -14,6 +14,8 @@
 #   - 认领时：从 .claimed 读出 chatId 和用户原文记入 pending；/clear 在这一步直接归档
 #   - 收割时：先处理 clear / summary 请求，再看 pending 里哪些消息的回复已归档到 sent/<id>.json
 #     （daemon 发送成功才归档，里面 text 就是用户实际看到的回复），追加成一轮
+#   - /stop 由 daemon 秒级处理（不进 inbox）：被中断的消息移到 expired/ 并留 expired/<id>.stopped，
+#     收割时记成"被中断"的一轮；之后第一条新消息带 after_stop，提醒 worker 按新指令做、别接着做旧任务
 #   - 唤醒时：按 messageId 把 {summary, turns, compress_needed, ctx_key} 写进上下文文件，payload 的 context_file 指向它
 # 限制：只按大小（UTF-8 字节），不按轮数。超过 MAX_BYTES 时让 worker 压缩；worker 没压缩、涨到 2×MAX_BYTES
 #   时脚本兜底从最旧的开始丢。单条超长截断到 8000 字。
@@ -65,29 +67,6 @@ def is_clear(text):
         t = t2
     return t.strip().lower() == "/clear"
 
-def is_stop(text):
-    """整条消息就是 /stop（前面可以带 @机器人）"""
-    t = text or ""
-    while True:
-        t2 = MENTION_RE.sub("", t, count=1)
-        if t2 == t:
-            break
-        t = t2
-    return t.strip().lower() == "/stop"
-
-def is_start(text):
-    """整条消息就是 /start（前面可以带 @机器人）"""
-    t = text or ""
-    while True:
-        t2 = MENTION_RE.sub("", t, count=1)
-        if t2 == t:
-            break
-        t = t2
-    return t.strip().lower() == "/start"
-
-def muted_path(key):
-    return os.path.join(ctx_dir, "%s-muted-%s" % (name, key))
-
 def key_of(chat):
     chat = chat or "unknown"
     k = re.sub(r"[^A-Za-z0-9_-]", "_", chat)
@@ -116,23 +95,6 @@ def rm(p):
     try:
         os.remove(p)
     except FileNotFoundError:
-        pass
-
-def write_outbox(mid, chat, text):
-    """脚本直接写 outbox（用于 /stop /start 的确认回复，不经过 worker）"""
-    outbox = os.path.join(bridge, "outbox")
-    try:
-        os.makedirs(outbox, exist_ok=True)
-    except Exception:
-        pass
-    data = {"messageId": mid, "chatId": chat, "text": text,
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S+08:00", time.localtime())}
-    tmp = os.path.join(outbox, mid + ".json.tmp")
-    try:
-        with open(tmp, "w") as f:
-            json.dump(data, f, ensure_ascii=False)
-        os.replace(tmp, os.path.join(outbox, mid + ".json"))
-    except Exception:
         pass
 
 def load_ctx(key):
@@ -165,6 +127,10 @@ def do_clear(pending, chat, mid):
     for k, v in pending.items():
         if v.get("chatId") == chat and (k == mid or (at and v.get("at", "") <= at)):
             v["skip"] = True
+
+def stop_info(chat):
+    """daemon 写的 <bridge>/stop/<会话>.json（文件名规则与 key_of 相同）"""
+    return load(os.path.join(bridge, "stop", key_of(chat) + ".json"))
 
 def user_text(d):
     text = (d.get("text") or "").strip()
@@ -220,6 +186,22 @@ if mode == "harvest":
     now = time.time()
     for mid, info in list(pending.items()):
         sent_f = os.path.join(bridge, "sent", mid + ".json")
+        if os.path.exists(os.path.join(bridge, "expired", mid + ".stopped")):
+            # 用户 /stop 中断了这条：记成一轮，让后面的 worker 知道它没做完
+            del pending[mid]; changed = True
+            if info.get("skip"):
+                continue
+            chat = info.get("chatId") or "unknown"
+            key = key_of(chat)
+            ctx = load_ctx(key)
+            ctx["chatId"] = chat
+            ctx["turns"].append({"seq": ctx["next_seq"], "user": info.get("text", ""),
+                                 "assistant": "（用户发 /stop 中断了这条，回复没有发出；中断前可能已执行了一部分）",
+                                 "ts": int(now)})
+            ctx["next_seq"] += 1
+            ctx["updated"] = int(now)
+            save_atomic(ctx_path(key), ctx)
+            continue
         if not os.path.exists(sent_f):
             gone = any(os.path.exists(os.path.join(bridge, d, mid + ".json")) for d in ("failed", "expired"))
             if gone or now - info.get("ts", now) > PENDING_TTL:
@@ -259,33 +241,18 @@ elif mode == "record":
             continue
         chat = str(d.get("chatId") or "unknown")
         pending[mid] = {"chatId": chat, "text": user_text(d), "ts": int(time.time()), "at": str(d.get("ts", ""))}
-        txt = d.get("text") or ""
-        key = key_of(chat)
-        mp = muted_path(key)
-        if is_stop(txt):
-            # /stop：创建静音标记，这条不唤醒、不入历史
-            try:
-                open(mp, "w").write(str(int(time.time())))
-            except Exception:
-                pass
-            pending[mid]["skip"] = True
-            write_outbox(mid, chat, "已暂停，发 /start 或直接发消息恢复。")
-        elif is_start(txt):
-            # /start：移除静音标记，这条不唤醒、不入历史
-            try:
-                os.remove(mp)
-            except Exception:
-                pass
-            pending[mid]["skip"] = True
-            write_outbox(mid, chat, "已恢复，随时可以聊。")
-        elif os.path.exists(mp):
-            # 静音中收到正常消息：自动解除静音，这条正常处理
-            try:
-                os.remove(mp)
-            except Exception:
-                pass
-            # 不设 skip，走正常流程（会唤醒 worker 回复）
-        elif is_clear(txt):
+        # /stop 之后的第一条：标 after_stop（同一次 /stop 只标一次，记在历史文件的 stop_seen）
+        st = stop_info(chat)
+        st_at = str(st.get("at") or "")
+        if st_at and st_at < pending[mid]["at"]:
+            key = key_of(chat)
+            ctx = load_ctx(key)
+            if st_at > str(ctx.get("stop_seen") or ""):
+                pending[mid]["after_stop"] = st_at
+                ctx["chatId"] = chat
+                ctx["stop_seen"] = st_at
+                save_atomic(ctx_path(key), ctx)
+        if is_clear(d.get("text")):
             do_clear(pending, chat, mid)
     save_atomic(PENDING, pending)
 
@@ -300,10 +267,6 @@ elif mode == "context":
         if me.get("skip"):
             out[mid] = {"ctx_key": key, "cleared": True, "summary": "", "turns": [], "compress_needed": False}
             continue
-        if os.path.exists(muted_path(key)):
-            # 静音中：不唤醒，这条消息会被脚本直接消费掉
-            out[mid] = {"ctx_key": key, "muted": True, "summary": "", "turns": [], "compress_needed": False}
-            continue
         ctx = load_ctx(key)
         need = (size(ctx) > max_bytes and key not in flagged and len(ctx["turns"]) > 1
                 and not os.path.exists(ctx_path(key, ".summary")))
@@ -316,6 +279,8 @@ elif mode == "context":
                             if k != mid and v.get("chatId") == chat and not v.get("skip") and v.get("at", "") < mine):
             turns.append({"user": pending[k].get("text", ""), "assistant": "（这条还在处理中，回复尚未发出）"})
         out[mid] = {"ctx_key": key, "summary": ctx["summary"], "turns": turns, "compress_needed": need}
+        if me.get("after_stop"):
+            out[mid]["after_stop"] = True
     p = os.path.join(ctx_dir, "%s-wake-%d-%d.json" % (name, int(time.time() * 1000), os.getpid()))
     save_atomic(p, out)
     print(p)
@@ -375,21 +340,6 @@ ids="$(printf '%s\n' "${claimed[@]}" | jq -R . | jq -s -c .)"
 ctx_file="$(py context "${claimed[@]}" 2>/dev/null || true)"
 # python 出错时不带上下文，保证 wake 照常发出
 if [ -n "$ctx_file" ] && [ -f "$ctx_file" ]; then ctx_ref="$(printf '%s' "$ctx_file" | jq -R .)"; else ctx_ref=null; fi
-
-# 如果所有消息都是 skip/muted/cleared（比如 /stop、/start），就不唤醒
-all_skip="$(python3 -c "
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-    msgs = json.loads(sys.argv[2])
-    skip = all(d.get(m, {}).get('skip') or d.get(m, {}).get('muted') or d.get(m, {}).get('cleared') for m in msgs)
-    print('yes' if skip and msgs else 'no')
-except Exception:
-    print('no')
-" "$ctx_file" "$ids" 2>/dev/null || echo no)"
-if [ "$all_skip" = "yes" ]; then
-  silent "all messages skipped or muted" '{}'
-fi
 
 # 轮询本身不写日志（5 秒一次会刷屏）；wake 由运行时记录。
 wake "$NAME inbox 有 $count 条待处理消息" "{\"count\":$count,\"message_ids\":$ids,\"max_bytes\":$MAX_BYTES,\"context_file\":$ctx_ref}"

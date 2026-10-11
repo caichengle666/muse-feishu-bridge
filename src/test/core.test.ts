@@ -419,3 +419,64 @@ test("P2-#9 字节上限：最坏情况（全 4 字节 emoji / 全中文）每�
     for (const p of parts) assert.ok(Buffer.byteLength(p, "utf8") <= 12_100, `${ch}: ${Buffer.byteLength(p, "utf8")}`);
   }
 });
+
+test("STOP-1 /stop：中断本会话进行中的消息（未认领/已认领/已写 outbox），写 stop 标记，旧回复不再发出；别的会话不受影响；没任务时如实说", async () => {
+  const env = await makeEnv();
+  const { rename: mv, readFile: rf } = await import("node:fs/promises");
+  const { existsSync: ex } = await import("node:fs");
+  const { join: pj } = await import("node:path");
+  await env.bridge.onMessage(textMsg("om_a", "帮我删掉 a 目录"));
+  await env.bridge.onMessage(textMsg("om_b", "顺便再跑测试"));
+  await env.bridge.onMessage(textMsg("om_c", "写个报告"));
+  await env.bridge.onMessage(textMsg("om_x", "别的群的活", { chatId: "oc_2" }));
+  await env.bridge.onMessage(textMsg("om_done", "早就回完的"));
+  await writeOutbox(env, "om_done", { text: "完成" });
+  await env.bridge.drain();
+  await mv(pj(env.paths.inbox, "om_done.json"), pj(env.paths.root, "om_done.consumed")); // worker 已消费
+  // om_a：hook 已认领、worker 在跑；om_b：还在 inbox；om_c：worker 已写出回复但还没发
+  await mv(pj(env.paths.inbox, "om_a.json"), pj(env.paths.inbox, "om_a.json.claimed"));
+  await writeOutbox(env, "om_c", { text: "报告内容" });
+  await env.bridge.onMessage(textMsg("om_stop", "/stop"));
+  const replies = (id: string) => env.t.calls.filter((c) => c.method === "replyText" && c.target === id).map((c) => String(c.arg));
+  assert.ok(replies("om_stop")[0].includes("已停止 3 个"), replies("om_stop")[0]);
+  assert.deepEqual((await ls(env.paths.inbox)).sort(), ["om_x.json"]);
+  for (const id of ["om_a", "om_b", "om_c"]) {
+    assert.ok(ex(pj(env.paths.expired, `${id}.stopped`)), id);
+    assert.ok(env.outbox.hasTombstone(id), id);
+  }
+  assert.ok(!ex(pj(env.paths.expired, "om_done.stopped")));
+  const stop = JSON.parse(await rf(pj(env.paths.stop, "oc_1.json"), "utf8"));
+  assert.equal(stop.messageId, "om_stop");
+  assert.deepEqual([...stop.cancelled].sort(), ["om_a", "om_b", "om_c"]);
+  // worker 停得慢、之后才写出 om_a 的回复：不发
+  await writeOutbox(env, "om_a", { text: "已删除 a 目录" });
+  await env.bridge.drain();
+  assert.deepEqual(replies("om_a"), []);
+  assert.deepEqual(replies("om_c"), []);
+  assert.ok(!env.t.texts().some((x) => x.includes("已删除") || x.includes("报告内容")));
+  // 新指令照常
+  await env.bridge.onMessage(textMsg("om_new", "改成只删 b"));
+  assert.ok((await ls(env.paths.inbox)).includes("om_new.json"));
+  // 再 /stop：只中断 om_new
+  await env.bridge.onMessage(textMsg("om_stop2", "/stop"));
+  assert.ok(replies("om_stop2")[0].includes("已停止 1 个"));
+  await env.bridge.onMessage(textMsg("om_stop3", "/stop"));
+  assert.ok(replies("om_stop3")[0].includes("没有进行中"));
+  // 另一个会话的不动
+  assert.ok(!env.outbox.hasTombstone("om_x"));
+  // /help 里有 /stop
+  await env.bridge.onMessage(textMsg("om_h", "/help"));
+  assert.ok(replies("om_h")[0].includes("/stop"));
+});
+
+test("STOP-2 卡片模式：/stop 把\"处理中\"卡改成\"已停止\"", async () => {
+  const env = await makeEnv({ ackDelayMs: 1, config: { allowedOpenIds: ["ou_owner"], replyTimeoutMin: 1, replyStyle: "card" } as never });
+  await env.bridge.onMessage(textMsg("om_k", "长任务"));
+  await waitFor(() => env.t.cards().length > 0);
+  await sleep(20);
+  await env.bridge.idle();
+  await env.bridge.onMessage(textMsg("om_ks", "/stop"));
+  const t = env.t.texts().join("\n");
+  assert.ok(t.includes("已被 /stop 中断"), JSON.stringify(env.t.calls.map((c) => [c.method, c.target])) + t);
+  assert.ok(t.includes("已停止 1 个"), t);
+});

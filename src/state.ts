@@ -256,6 +256,11 @@ export class RouteStore {
     return this.m.get(id);
   }
 
+  /** 所有路由（/stop 按会话找进行中的消息用） */
+  entries(): [string, Route][] {
+    return [...this.m.entries()];
+  }
+
   set(id: string, r: Route): Promise<void> {
     this.m.delete(id);
     this.m.set(id, r);

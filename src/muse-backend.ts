@@ -90,6 +90,28 @@ export class MuseBackend {
     }
   }
 
+  /**
+   * /stop：把这条的 inbox 文件（未认领的 <id>.json 或已认领的 <id>.json.claimed）原子移到
+   * expired/<id>.inbox.json，并写 expired/<id>.stopped 标记（hook 据此把这一轮记成"被中断"）。
+   * 返回原来的状态；两个文件都不在（已处理完 / 不存在）返回 null。
+   */
+  async stop(id: string, at: string): Promise<"unclaimed" | "claimed" | null> {
+    if (!isSafeId(id)) return null;
+    const dst = join(this.dirs.expired, `${id}.inbox.json`);
+    let state: "unclaimed" | "claimed" | null = null;
+    for (const [src, st] of [[this.inboxPath(id), "unclaimed"], [`${this.inboxPath(id)}.claimed`, "claimed"]] as const) {
+      try {
+        await rename(src, dst);
+        state = st;
+        break;
+      } catch {
+        /* 不在 / 刚被认领，试下一个 */
+      }
+    }
+    if (state) await atomicWriteJson(join(this.dirs.expired, `${id}.stopped`), { at, state });
+    return state;
+  }
+
   /** 列出 inbox 里未认领的条目（巡检用）。损坏文件跳过。 */
   async listUnclaimed(): Promise<InboxItem[]> {
     let names: string[];

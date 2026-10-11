@@ -67,6 +67,15 @@ const ACK_TEXT = "收到，正在处理，稍等…";
 const TIMEOUT_UNCLAIMED_TEXT = "抱歉，这条消息等了很久都没被处理，已放弃。麻烦稍后再发一次。";
 const TIMEOUT_SLOW_TEXT = "还在处理中，比平时慢一些，完成后会直接回复在这里。";
 const SLASH_TITLES: Record<string, string> = { help: "📖 可用命令", ping: "🏓 Pong", status: "📊 桥接状态", ids: "🪪 open_id" };
+const STOPPED_CARD_TEXT = "已被 /stop 中断，这条的回复不会再发出。";
+
+/** 会话 id → stop/ 下的文件名（只留安全字符，被替换过就加短哈希防撞名） */
+export function stopFileName(chatId: string): string {
+  const c = chatId || "unknown";
+  let k = c.replace(/[^A-Za-z0-9_-]/g, "_");
+  if (k !== c) k += "_" + createHash("md5").update(c).digest("hex").slice(0, 8);
+  return `${k}.json`;
+}
 
 function sha(s: string): string {
   return createHash("sha256").update(s).digest("hex");
@@ -417,6 +426,10 @@ export function createBridge(d: BridgeDeps): Bridge {
     // 斜杠命令：白名单之后、下载附件和入队之前；只拦截已登记的命令，其余照常交给助手
     if ((msg.msgType === "text" || msg.msgType === "post") && !fromBot) {
       const slash = parseSlashCommand(cmdText);
+      if (slash && slash.name === "stop") {
+        await handleStop(msg, id);
+        return;
+      }
       if (slash) {
         let out: string | null = null;
         try {
@@ -512,6 +525,53 @@ export function createBridge(d: BridgeDeps): Bridge {
       t.unref?.();
       ackTimers.set(id, t);
     }
+  }
+
+  /**
+   * /stop：中断本会话里所有还没回完的消息（daemon 收到就处理，不进 inbox、不等 hook 轮询）。
+   *   - inbox 里的（未认领 / 已认领）→ 移到 expired/，写 <id>.stopped 标记；
+   *   - 写墓碑：worker 之后才写出的回复、正在分段发送的回复，都不会再发出去；
+   *   - 写 stop/<会话>.json {chatId, at, messageId, cancelled}：worker 每步动手前查它，看到就自己停下；
+   *   - "处理中"卡改成"已停止"，回用户一句。
+   */
+  async function handleStop(msg: FeishuMessage, id: string): Promise<void> {
+    const at = new Date(now()).toISOString();
+    const cancelled: string[] = [];
+    for (const [mid, r] of d.routes.entries()) {
+      if (mid === id || r.chatId !== msg.chatId || !isSafeId(mid)) continue;
+      const loc = d.outbox.locate(mid);
+      if (loc === "sent" || loc === "failed" || loc === "expired" || d.outbox.hasTombstone(mid)) continue;
+      const st = await d.backend.stop(mid, at).catch(() => null);
+      if (!st && loc !== "outbox" && loc !== "inflight") continue; // 早就回完了
+      if (!st) await atomicWriteJson(join(d.paths.expired, `${mid}.stopped`), { at, state: loc }).catch(() => undefined);
+      await d.outbox.tombstone(mid);
+      waiting.delete(mid);
+      clearAck(mid);
+      cancelled.push(mid);
+      await ackPending.get(mid)?.catch(() => undefined);
+      const r2 = d.routes.get(mid);
+      if (cardMode && r2?.cardMessageId && !r2.cardFinal) {
+        await d.transport
+          .updateCard(r2.cardMessageId, card({ status: "stopped", markdown: STOPPED_CARD_TEXT, footer: elapsedFooter(mid) }))
+          .catch((e) => log("daemon.stop_card_failed", { msgid: mid, error: errText(e) }));
+        await setRoute(mid, { cardFinal: true });
+      }
+    }
+    try {
+      await mkdir(d.paths.stop, { recursive: true });
+      await atomicWriteJson(join(d.paths.stop, stopFileName(msg.chatId)), { chatId: msg.chatId, at, messageId: id, cancelled });
+    } catch (e) {
+      log("daemon.stop_write_failed", { msgid: id, error: errText(e) });
+    }
+    log("daemon.stop", { msgid: id, chatId: msg.chatId, cancelled });
+    const out = cancelled.length
+      ? `已停止 ${cancelled.length} 个进行中的任务，它的回复不会再发出。\n已经执行完的步骤撤不回来；直接发新指令就行。`
+      : "现在没有进行中的任务。直接发新指令就行。";
+    const uuid = partUuid(id, "stop");
+    await (cardMode
+      ? d.transport.replyCard(id, card({ status: "stopped", title: "⏹️ 已停止", markdown: out }), uuid)
+      : d.transport.replyText(id, out, { uuid })
+    ).catch((e) => log("daemon.slash_reply_failed", { msgid: id, error: errText(e) }));
   }
 
   async function handleCardAction(action: FeishuCardAction): Promise<undefined> {
@@ -613,7 +673,7 @@ export function createBridge(d: BridgeDeps): Bridge {
     for (const [id] of waiting) if (d.outbox.isSent(id)) waiting.delete(id);
     // 3) 清理旧文件（默认 7 天）
     const age = d.pruneMaxAgeMs ?? 7 * 24 * 3600_000;
-    for (const dir of [d.paths.sent, d.paths.expired, d.paths.failed]) await pruneOldFiles(dir, age, t);
+    for (const dir of [d.paths.sent, d.paths.expired, d.paths.failed, d.paths.stop]) await pruneOldFiles(dir, age, t);
     await pruneIncoming(age, t);
   }
 

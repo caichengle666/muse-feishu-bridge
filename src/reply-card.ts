@@ -9,7 +9,7 @@
 
 import { applyAts, type AtTarget } from "./mentions.js";
 
-export type CardStatus = "running" | "slow" | "done" | "timeout" | "failed" | "info";
+export type CardStatus = "running" | "slow" | "done" | "timeout" | "failed" | "info" | "stopped";
 
 const HEAD: Record<CardStatus, { title: string; template: string }> = {
   running: { title: "⏳ 处理中", template: "blue" },
@@ -18,6 +18,7 @@ const HEAD: Record<CardStatus, { title: string; template: string }> = {
   timeout: { title: "⚠️ 已超时", template: "red" },
   failed: { title: "❌ 出错了", template: "red" },
   info: { title: "ℹ️ 信息", template: "indigo" },
+  stopped: { title: "⏹️ 已停止", template: "grey" },
 };
 
 export interface ReplyCardInput {

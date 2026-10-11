@@ -53,6 +53,8 @@ const COMMANDS: Record<string, { desc: string; run: Handler }> = {
     run: () => "可用命令：\n" + Object.entries(COMMANDS).map(([k, v]) => `/${k} - ${v.desc}`).join("\n"),
   },
   ping: { desc: "测试连通性", run: () => "pong 🏓" },
+  // 实际由 bridge.ts 的 handleStop 处理（要动 inbox/outbox），这里只为出现在 /help 里
+  stop: { desc: "立刻中断本会话里正在进行的任务（之后直接发新指令）", run: () => "" },
   ids: {
     desc: "查看 open_id（本应用视角）：/ids @某人 @某机器人",
     run: (ctx) =>

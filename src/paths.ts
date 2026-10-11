@@ -23,6 +23,8 @@ export interface Paths {
   sent: string;
   failed: string;
   expired: string;
+  /** /stop 标记：stop/<会话>.json，worker 每步动手前查 */
+  stop: string;
   incoming: string;
   outgoing: string;
 }
@@ -53,6 +55,7 @@ export function makePaths(root: string): Paths {
     sent: join(r, "sent"),
     failed: join(r, "failed"),
     expired: join(r, "expired"),
+    stop: join(r, "stop"),
     incoming: join(r, "incoming"),
     outgoing: join(r, "outgoing"),
   };
