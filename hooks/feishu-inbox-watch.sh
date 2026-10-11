@@ -65,6 +65,29 @@ def is_clear(text):
         t = t2
     return t.strip().lower() == "/clear"
 
+def is_stop(text):
+    """整条消息就是 /stop（前面可以带 @机器人）"""
+    t = text or ""
+    while True:
+        t2 = MENTION_RE.sub("", t, count=1)
+        if t2 == t:
+            break
+        t = t2
+    return t.strip().lower() == "/stop"
+
+def is_start(text):
+    """整条消息就是 /start（前面可以带 @机器人）"""
+    t = text or ""
+    while True:
+        t2 = MENTION_RE.sub("", t, count=1)
+        if t2 == t:
+            break
+        t = t2
+    return t.strip().lower() == "/start"
+
+def muted_path(key):
+    return os.path.join(ctx_dir, "%s-muted-%s" % (name, key))
+
 def key_of(chat):
     chat = chat or "unknown"
     k = re.sub(r"[^A-Za-z0-9_-]", "_", chat)
@@ -93,6 +116,23 @@ def rm(p):
     try:
         os.remove(p)
     except FileNotFoundError:
+        pass
+
+def write_outbox(mid, chat, text):
+    """脚本直接写 outbox（用于 /stop /start 的确认回复，不经过 worker）"""
+    outbox = os.path.join(bridge, "outbox")
+    try:
+        os.makedirs(outbox, exist_ok=True)
+    except Exception:
+        pass
+    data = {"messageId": mid, "chatId": chat, "text": text,
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S+08:00", time.localtime())}
+    tmp = os.path.join(outbox, mid + ".json.tmp")
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, os.path.join(outbox, mid + ".json"))
+    except Exception:
         pass
 
 def load_ctx(key):
@@ -219,7 +259,33 @@ elif mode == "record":
             continue
         chat = str(d.get("chatId") or "unknown")
         pending[mid] = {"chatId": chat, "text": user_text(d), "ts": int(time.time()), "at": str(d.get("ts", ""))}
-        if is_clear(d.get("text")):
+        txt = d.get("text") or ""
+        key = key_of(chat)
+        mp = muted_path(key)
+        if is_stop(txt):
+            # /stop：创建静音标记，这条不唤醒、不入历史
+            try:
+                open(mp, "w").write(str(int(time.time())))
+            except Exception:
+                pass
+            pending[mid]["skip"] = True
+            write_outbox(mid, chat, "已暂停，发 /start 或直接发消息恢复。")
+        elif is_start(txt):
+            # /start：移除静音标记，这条不唤醒、不入历史
+            try:
+                os.remove(mp)
+            except Exception:
+                pass
+            pending[mid]["skip"] = True
+            write_outbox(mid, chat, "已恢复，随时可以聊。")
+        elif os.path.exists(mp):
+            # 静音中收到正常消息：自动解除静音，这条正常处理
+            try:
+                os.remove(mp)
+            except Exception:
+                pass
+            # 不设 skip，走正常流程（会唤醒 worker 回复）
+        elif is_clear(txt):
             do_clear(pending, chat, mid)
     save_atomic(PENDING, pending)
 
@@ -233,6 +299,10 @@ elif mode == "context":
         key = key_of(chat)
         if me.get("skip"):
             out[mid] = {"ctx_key": key, "cleared": True, "summary": "", "turns": [], "compress_needed": False}
+            continue
+        if os.path.exists(muted_path(key)):
+            # 静音中：不唤醒，这条消息会被脚本直接消费掉
+            out[mid] = {"ctx_key": key, "muted": True, "summary": "", "turns": [], "compress_needed": False}
             continue
         ctx = load_ctx(key)
         need = (size(ctx) > max_bytes and key not in flagged and len(ctx["turns"]) > 1
@@ -305,6 +375,21 @@ ids="$(printf '%s\n' "${claimed[@]}" | jq -R . | jq -s -c .)"
 ctx_file="$(py context "${claimed[@]}" 2>/dev/null || true)"
 # python 出错时不带上下文，保证 wake 照常发出
 if [ -n "$ctx_file" ] && [ -f "$ctx_file" ]; then ctx_ref="$(printf '%s' "$ctx_file" | jq -R .)"; else ctx_ref=null; fi
+
+# 如果所有消息都是 skip/muted/cleared（比如 /stop、/start），就不唤醒
+all_skip="$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    msgs = json.loads(sys.argv[2])
+    skip = all(d.get(m, {}).get('skip') or d.get(m, {}).get('muted') or d.get(m, {}).get('cleared') for m in msgs)
+    print('yes' if skip and msgs else 'no')
+except Exception:
+    print('no')
+" "$ctx_file" "$ids" 2>/dev/null || echo no)"
+if [ "$all_skip" = "yes" ]; then
+  silent "all messages skipped or muted" '{}'
+fi
 
 # 轮询本身不写日志（5 秒一次会刷屏）；wake 由运行时记录。
 wake "$NAME inbox 有 $count 条待处理消息" "{\"count\":$count,\"message_ids\":$ids,\"max_bytes\":$MAX_BYTES,\"context_file\":$ctx_ref}"
