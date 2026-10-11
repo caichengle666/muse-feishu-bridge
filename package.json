@@ -1,6 +1,6 @@
 {
   "name": "muse-feishu-bridge",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "Feishu/Lark long-connection bridge for the Muse platform (file-queue backend)",
   "type": "module",
   "scripts": {

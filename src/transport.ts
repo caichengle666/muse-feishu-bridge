@@ -193,10 +193,11 @@ export class FeishuTransport {
 
   private async probeBotOpenId() {
     try {
-      const res: any = await this.sdkClient!.request({
+      // 启动探测（会顺带取 tenant token）：代理新建隧道偶发 hang 时靠超时 + 重试恢复，不让一次卡住就起不来
+      const res: any = await withFeishuRetry(() => this.sdkClient!.request({
         url: "/open-apis/bot/v3/info",
         method: "GET",
-      });
+      }), "bot.info");
       this.botOpenId = res?.bot?.open_id || res?.data?.bot?.open_id || res?.data?.open_id;
       if (!this.botOpenId) {
         throw new Error(`bot/v3/info response missing open_id: ${JSON.stringify(res).slice(0, 200)}`);

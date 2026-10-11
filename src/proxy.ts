@@ -46,9 +46,8 @@ export function chooseProxy(target: string, cfgProxy: string | undefined, env: N
 }
 
 export function makeProxyAgent(url: string): HttpsProxyAgent<string> {
-  // 注意：不要开 keepAlive。实测 https-proxy-agent@7 的 keepAlive CONNECT 隧道
-  // 在某些代理（如 hatch-egress-proxy）上会 hang 住、请求超时；关掉后直连正常。
-  return new HttpsProxyAgent(url);
+  // keepAlive 复用 CONNECT 隧道：部分出口代理新建隧道偶发 hang，复用能少碰到；偶发 hang 由调用方超时重试兜底。
+  return new HttpsProxyAgent(url, { keepAlive: true });
 }
 
 /**
