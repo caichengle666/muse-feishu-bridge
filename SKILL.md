@@ -54,7 +54,7 @@
 
 中途遇到上面没覆盖、但会影响用户的选择（例如要覆盖已有 `secrets.env`、要换掉已有应用），同样先问再做。
 
-## 部署（推荐：扫码建应用，0.4.0+）
+## 部署（推荐：扫码建应用）
 
 ```bash
 git clone https://github.com/caichengle666/muse-feishu-bridge && cd muse-feishu-bridge
@@ -74,7 +74,7 @@ npm run doctor   # 只读自检，全部 OK 才算部署完成；FAIL 项按提�
 2. 后台运行 onboard（它会一直等扫码，最长 60 分钟），把输出写到日志；几秒后日志里会出现一条 `https://open.feishu.cn/page/launcher?...` 链接，同时生成 `onboard-qr.png`
 3. **把 `onboard-qr.png` 图片发给用户**（同时附上链接，手机上可直接点开），请用户用**手机飞书**扫码，在飞书的确认页核对名称和权限后点确认
 4. 用户确认后 onboard 自动退出并输出"成功"：App ID / Secret 已写入 `secrets.env`（600），扫码人的 open_id 已加入 `config.json` 白名单并设为主人，所需权限、长连接事件 `im.message.receive_v1`、卡片回调 `card.action.trigger` 都已开好，**不用进开发者后台、不用手动发布版本**
-5. 已有应用缺权限（如升级到 0.4.0 想用打字机效果）：`npm run onboard -- --update-permissions`，同样发二维码给用户扫一次
+5. 已有应用缺权限（如想用打字机效果但缺 `cardkit:card:write`）：`npm run onboard -- --update-permissions`，同样发二维码给用户扫一次
 6. 输出 access_denied = 用户点了拒绝；expired = 二维码过期，重新运行即可；扫码流程用不了就走下面的手动方式
 
 ## 手动部署（扫码不可用时）
@@ -147,7 +147,7 @@ inbox 里的消息不会自己处理——部署完 daemon 后必须创建一个
 - 卡片点击的 inbox id 是 `card_…`，照常用这个 id 写 outbox，daemon 会回复到被点的卡片
 - 发送失败看 `failed/<id>.reason.json`
 
-## 流式输出（打字机效果，0.4.0+）
+## 流式输出（打字机效果）
 
 长回复可以边写边让用户看到：处理过程中往 `stream/<messageId>.jsonl` 追加，每行一个 JSON：`{"text":"这一段内容\n\n"}`。
 
@@ -159,18 +159,18 @@ inbox 里的消息不会自己处理——部署完 daemon 后必须创建一个
 
 ## @ 别人 / 机器人之间接力
 
-- 登记协作机器人（0.3.5+）：在群里发 `/ids @某机器人`，会收到一张带"登记为协作机器人"按钮的卡片，点一下就同时写进 `config.json` 的 `peerBots` 并同步到运行中的 daemon，**立即生效，不用重启**（按钮只有白名单里的人点了才算数）
+- 登记协作机器人：在群里发 `/ids @某机器人`，会收到一张带"登记为协作机器人"按钮的卡片，点一下就同时写进 `config.json` 的 `peerBots` 并同步到运行中的 daemon，**立即生效，不用重启**（按钮只有白名单里的人点了才算数）
 - inbox 的 `mentions: [{openId, name}]` 是这条消息里被 @ 的人和机器人（不含自己）
 - 要真正 @ 谁，在 outbox 加 `"ats": ["张三", "ou_xxx"]`（名字或 open_id）。正文里写 `@张三` 会就地变成 @，没写的在开头补
 - 正文里直接写 `@协作机器人名字` 或 `@本条消息里被@的人` 也会自动识别成真 @（不想提醒对方就别带 @ 写名字）
 - 只能 @：本条消息里被 @ 的、发送者、主人、`config.peerBots` 里登记的协作机器人；其他会被丢弃
 - inbox 带 `fromBot: true` 表示是协作机器人交给你的活，`senderName` 是它的称呼，`hop` 是第几手
-- inbox 的 `mentions` 含被 @ 的自己（标 `isMe: true`），正文里 @自己 显示为 `@名字（你）`；`addressedToMe: true` 表示这条就是冲你来的（0.3.7+）
+- inbox 的 `mentions` 含被 @ 的自己（标 `isMe: true`），正文里 @自己 显示为 `@名字（你）`；`addressedToMe: true` 表示这条就是冲你来的
 - /ids 卡片登记按 open_id 优先匹配（配置里的称呼和飞书显示名不同也不会重复登记）；回复 @ 了主人和发送者以外的人时发纯文本（对方可能是没登记的机器人，卡片 @ 叫不动它）
 - 交活给别的机器人：`ats` 里写它的名字即可；到 `botMaxHops`（默认 3）手后不能再 @ 机器人，直接回复结果
 - 机器人交来的活做完后，如果不需要对方继续，就**不要**再 @ 它（否则会来回接力）
 
-## 断线补拉（0.5.0+）
+## 断线补拉
 
 daemon 重启或长连接重连后，自动把断线期间的消息拉回来补处理，worker 不用做任何事，这些消息照常出现在 inbox 里（只是来得晚一些）：
 
