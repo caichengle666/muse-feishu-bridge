@@ -36,6 +36,8 @@ mkdir -p "$CTX_DIR"
 # pending 格式：{messageId: {chatId, text}}；历史文件格式：
 #   {chatId, turns: [{user, assistant, ts}], updated}
 BRIDGE="$HOME/workspace/muse-feishu-bridge"
+# pending 为空时不起 python（每 5 秒一次，省得白跑）
+if [ -s "$PENDING" ] && grep -q '"' "$PENDING" 2>/dev/null; then
 python3 - "$PENDING" "$SENT" "$CTX_DIR" "$MAX_TURNS" "$MAX_CHARS" "$BRIDGE" <<'PYEOF' || true
 import json, os, re, sys, time
 
@@ -82,6 +84,10 @@ for mid, info in list(pending.items()):
         reply = ""
     chat = info.get("chatId", "unknown")
     user_text = (info.get("text", "") or "")[:2000]
+    if user_text.strip().lower().startswith("/clear"):
+        # 清空指令本身不记，否则新话题的第一轮就是"/clear → 已归档"
+        done.append(mid)
+        continue
     reply_text = (reply or "")[:2000]
     ctx_f = os.path.join(ctx_dir, "feishu-ctx-%s.json" % safe(chat))
     ctx = load(ctx_f)
@@ -103,6 +109,7 @@ for mid in done:
     del pending[mid]
 save_atomic(pending_path, pending)
 PYEOF
+fi
 
 # ---- 步骤 1：认领新消息（原有逻辑） ----
 claimed=( )
