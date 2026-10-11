@@ -14,9 +14,10 @@
 #   - 认领时：从 .claimed 读出 chatId 和用户原文记入 pending；/clear 在这一步直接归档
 #   - 收割时：先处理 clear / summary 请求，再看 pending 里哪些消息的回复已归档到 sent/<id>.json
 #     （daemon 发送成功才归档，里面 text 就是用户实际看到的回复），追加成一轮
-#   - 唤醒时：按 messageId 把 {summary, turns, compress_needed, ctx_key} 放进 payload 的 recent_context
-# 限制：只按字数，不按轮数。超过 MAX_CHARS 时让 worker 压缩；worker 没压缩、涨到 2×MAX_CHARS
-#   时脚本兜底从最旧的开始丢。单条超长截断到 2000 字。所有 state 原子写入；同一时刻只跑一个实例。
+#   - 唤醒时：按 messageId 把 {summary, turns, compress_needed, ctx_key} 写进上下文文件，payload 的 context_file 指向它
+# 限制：只按大小（UTF-8 字节），不按轮数。超过 MAX_BYTES 时让 worker 压缩；worker 没压缩、涨到 2×MAX_BYTES
+#   时脚本兜底从最旧的开始丢。单条超长截断到 8000 字。
+# 上下文太大不适合塞进 wake 参数，写到 ~/hooks/state/<NAME>-wake-*.json，payload 只带 context_file 路径。所有 state 原子写入；同一时刻只跑一个实例。
 set -euo pipefail
 source "$HATCH_HOOK_RUNTIME"
 
@@ -25,7 +26,8 @@ BRIDGE_ROOT="$HOME/workspace/muse-feishu-bridge" # 桥接部署目录：装在�
 INBOX="$BRIDGE_ROOT/inbox"
 CTX_DIR="$HOME/hooks/state"
 STALE_SECS=1500        # 认领有效期：必须大于回复超时（config.json replyTimeoutMin=20 分钟）
-MAX_CHARS=30000        # 每个会话的上下文字数上限（含摘要）。Muse Spark 1.3 窗口 1M token，3 万字约占 3%
+MAX_BYTES="${CTX_MAX_BYTES:-524288}"  # 每个会话的上下文上限：512KB（UTF-8 字节，含摘要），超了让 worker 压缩
+                                      # Muse Spark 1.3 窗口 1,048,576 token；512KB 中文约 17 万字
 CTX_TTL_DAYS=7         # 多少天没动过的历史删掉
 ARCHIVE_TTL_DAYS=30    # /clear 归档保留多少天
 
@@ -45,12 +47,12 @@ fi
 read -r -d '' PYLIB <<'PYEOF' || true
 import hashlib, json, os, re, sys, time
 
-mode, name, ctx_dir, bridge, max_chars = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
+mode, name, ctx_dir, bridge, max_bytes = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
 args = sys.argv[6:]
 PENDING = os.path.join(ctx_dir, name + "-pending.json")
 PENDING_TTL = 24 * 3600   # 一天还没等到回复（失败/作废/worker 一直崩）就放弃
-ITEM_MAX = 2000           # 单条截断
-SUMMARY_MAX = 3000        # 摘要上限（worker 写超了也截断）
+ITEM_MAX = 8000           # 单条截断（字）
+SUMMARY_MAX = 6000        # 摘要上限（字，worker 写超了也截断）
 MENTION_RE = re.compile(r"^\s*(@[^@\n]*?（你）|@\S+)\s*")
 
 def is_clear(text):
@@ -106,8 +108,11 @@ def load_ctx(key):
     ctx["next_seq"] = max(int(ctx.get("next_seq") or 0), seq + 1)
     return ctx
 
-def size(ctx):
-    return len(ctx["summary"]) + sum(len(t.get("user", "")) + len(t.get("assistant", "")) for t in ctx["turns"])
+def blen(s):
+    return len((s or "").encode("utf-8"))
+
+def size(ctx):  # UTF-8 字节
+    return blen(ctx["summary"]) + sum(blen(t.get("user")) + blen(t.get("assistant")) for t in ctx["turns"])
 
 def do_clear(pending, chat, mid):
     """归档该会话历史；这条以及同会话更早的未完成消息都不进新历史。"""
@@ -194,8 +199,8 @@ if mode == "harvest":
                              "assistant": (reply.get("text") or "")[:ITEM_MAX], "ts": int(now)})
         ctx["next_seq"] += 1
         # 兜底：worker 一直没压缩、涨到 2 倍上限时，从最旧的开始丢到上限以内
-        if size(ctx) > 2 * max_chars:
-            while len(ctx["turns"]) > 1 and size(ctx) > max_chars:
+        if size(ctx) > 2 * max_bytes:
+            while len(ctx["turns"]) > 1 and size(ctx) > max_bytes:
                 ctx["turns"].pop(0)
             if "已丢弃" not in ctx["summary"]:
                 ctx["summary"] = (ctx["summary"] + "\n（更早的若干轮未及时压缩，已丢弃）").strip()
@@ -230,7 +235,7 @@ elif mode == "context":
             out[mid] = {"ctx_key": key, "cleared": True, "summary": "", "turns": [], "compress_needed": False}
             continue
         ctx = load_ctx(key)
-        need = (size(ctx) > max_chars and key not in flagged and len(ctx["turns"]) > 1
+        need = (size(ctx) > max_bytes and key not in flagged and len(ctx["turns"]) > 1
                 and not os.path.exists(ctx_path(key, ".summary")))
         if need:
             flagged.add(key)
@@ -241,9 +246,11 @@ elif mode == "context":
                             if k != mid and v.get("chatId") == chat and not v.get("skip") and v.get("at", "") < mine):
             turns.append({"user": pending[k].get("text", ""), "assistant": "（这条还在处理中，回复尚未发出）"})
         out[mid] = {"ctx_key": key, "summary": ctx["summary"], "turns": turns, "compress_needed": need}
-    print(json.dumps(out, ensure_ascii=False))
+    p = os.path.join(ctx_dir, "%s-wake-%d-%d.json" % (name, int(time.time() * 1000), os.getpid()))
+    save_atomic(p, out)
+    print(p)
 PYEOF
-py() { python3 -c "$PYLIB" "$1" "$NAME" "$CTX_DIR" "$BRIDGE_ROOT" "$MAX_CHARS" "${@:2}"; }
+py() { python3 -c "$PYLIB" "$1" "$NAME" "$CTX_DIR" "$BRIDGE_ROOT" "$MAX_BYTES" "${@:2}"; }
 
 # ---- 步骤 0：合并 worker 的压缩/换话题请求，收割已发出的回复 ----
 if grep -q '"' "$PENDING" 2>/dev/null || compgen -G "$CTX_DIR/$NAME-ctx-*.summary.json" >/dev/null || compgen -G "$CTX_DIR/$NAME-ctx-*.clear.json" >/dev/null; then
@@ -283,6 +290,7 @@ if [ "${#claimed[@]}" -gt 0 ]; then
 fi
 
 # ---- 步骤 3：清理过期历史（.summary/.clear 请求文件也一起） ----
+find "$CTX_DIR" -maxdepth 1 -name "$NAME-wake-*.json" -mmin +1440 -delete 2>/dev/null || true
 find "$CTX_DIR" -maxdepth 1 -name "$NAME-ctx-*.json" ! -name "*-archived-*" -mtime +$CTX_TTL_DAYS -delete 2>/dev/null || true
 find "$CTX_DIR" -maxdepth 1 -name "$NAME-ctx-*-archived-*.json" -mtime +$ARCHIVE_TTL_DAYS -delete 2>/dev/null || true
 find "$CTX_DIR" -maxdepth 1 -name "$NAME-*.tmp.*" -mmin +10 -delete 2>/dev/null || true
@@ -292,11 +300,11 @@ if [ "$count" -eq 0 ]; then
   silent "inbox empty" '{}'
 fi
 
-# ---- 步骤 4：组装 recent_context ----
+# ---- 步骤 4：组装上下文文件 ----
 ids="$(printf '%s\n' "${claimed[@]}" | jq -R . | jq -s -c .)"
-ctx_json="$(py context "${claimed[@]}" 2>/dev/null || true)"
-# python 出错时退回空上下文，保证 wake 照常发出
-if ! printf '%s' "$ctx_json" | jq -e 'type == "object"' >/dev/null 2>&1; then ctx_json='{}'; fi
+ctx_file="$(py context "${claimed[@]}" 2>/dev/null || true)"
+# python 出错时不带上下文，保证 wake 照常发出
+if [ -n "$ctx_file" ] && [ -f "$ctx_file" ]; then ctx_ref="$(printf '%s' "$ctx_file" | jq -R .)"; else ctx_ref=null; fi
 
 # 轮询本身不写日志（5 秒一次会刷屏）；wake 由运行时记录。
-wake "$NAME inbox 有 $count 条待处理消息" "{\"count\":$count,\"message_ids\":$ids,\"max_chars\":$MAX_CHARS,\"recent_context\":$ctx_json}"
+wake "$NAME inbox 有 $count 条待处理消息" "{\"count\":$count,\"message_ids\":$ids,\"max_bytes\":$MAX_BYTES,\"context_file\":$ctx_ref}"
