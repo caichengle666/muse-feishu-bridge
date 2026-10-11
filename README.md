@@ -197,6 +197,8 @@ npm run doctor
 检测到 `HTTPS_PROXY`（或 `HTTP_PROXY` / `ALL_PROXY`）时，REST 和长连接统一走同一个 CONNECT 隧道；遵守 `NO_PROXY`。
 `config.json` 里 `"proxy": "off"` 强制直连，填 `"http://host:port"` 则覆盖环境变量。`--check-config` 会显示实际出网方式。
 
+**Muse 沙盒**：沙盒的出网代理会拦 node 的 CONNECT 请求，直接用 `HTTPS_PROXY` 会握手超时。做法是在本机起一个出网中转（例如 `127.0.0.1:19081`），`config.json` 写 `"proxy": "http://127.0.0.1:19081"`，check-config 确认后重启 daemon；中转要和 daemon 一起常驻。
+
 ## 流式输出（打字机效果）
 
 长回复不用等写完才看到：助手处理中往 `stream/<messageId>.jsonl` 追加 `{"text":"一段内容\n\n"}`（每行一个 JSON，各段原样拼接），daemon 每秒把累计内容推到这条消息的状态卡上，标题变成「✍️ 正在输出」。

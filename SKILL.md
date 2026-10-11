@@ -66,6 +66,10 @@ bash keepalive.sh --install-cron && bash keepalive.sh   # 常驻（第 6 项选 
 npm run doctor   # 只读自检，全部 OK 才算部署完成；FAIL 项按提示修
 ```
 
+只能经代理出网的机器：保持环境里的 `HTTPS_PROXY` 即可（REST 和长连接都会走它），或在 `config.json` 写 `"proxy": "http://host:port"`；check-config 的「出网」一行显示实际方式。
+
+**Muse 沙盒出网**：沙盒的出网代理会拦 node 发出的 CONNECT 请求，直接用环境里的 `HTTPS_PROXY` 会出现长连接握手超时、onboard / check-config 连不上。遇到这种情况，自己在本机起一个出网中转（例如监听 `127.0.0.1:19081`，先用 curl 经它访问 `open.feishu.cn` 确认能通），在 `config.json` 写 `"proxy": "http://127.0.0.1:19081"`，再跑 check-config 确认「出网」一行显示的是这个中转，然后重启 daemon。中转也要放进常驻保活，沙盒重启后先拉起中转再拉起 daemon。
+
 部署收尾：`npm run doctor` 没有 FAIL 后，请用户**关掉 Muse 网页、只用手机飞书**给机器人发一条消息，收到回复才算真的通了。
 
 `npm run onboard` 的做法（Muse 照做）：
