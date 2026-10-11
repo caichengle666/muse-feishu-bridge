@@ -12,7 +12,7 @@
 
 ## 运行要求
 
-- Node.js 18+
+- Node.js 20+
 - 飞书开放平台创建**企业自建应用**，开启机器人能力，事件订阅选"使用长连接接收事件"，订阅 `im.message.receive_v1`；回调配置同样选长连接，订阅 `card.action.trigger`（/ids 登记协作机器人等卡片按钮要用，不订阅点按钮会报 200672）
 - 开通权限（建议一次性全开，后面再加要重新发布应用版本）：`im:message`、`im:message.p2p_msg:readonly`（收单聊消息）、`im:message:send_as_bot`、`im:message.group_at_msg:readonly`、`im:resource`（上传/下载图片和文件）、`im:message:update`（更新应用发送的消息，卡片原地更新）、`im:message.reactions:write_only`（收到消息先回表情）、`im:message.group_at_msg.include_bot:readonly`（机器人互动——收其他机器人 @ 你的消息）、`im:chat:readonly`（获取群组信息，免审）、`cardkit:card:write`（流式打字机卡片）；可选：`im:chat`、`im:chat:read`、`im:chat.members:read`（当前代码未用到，留给以后的群管理功能）。完整清单可用下方 JSON 在"权限管理 → 批量导入"一次开通
 - `config.json` 的 `allowedOpenIds` 白名单 fail-closed（为空拒绝启动）
@@ -125,7 +125,7 @@ inbox 里的消息不会自己处理——部署完 daemon 后必须创建一个
 - 轮询脚本逻辑：检查 `inbox/` 有无新的 `.json`，有则原子认领（rename 为 `.json.claimed`）后 `wake` 唤醒 worker
 - worker 的 prompt 要写清：读取 claimed 文件 → 作答 → 写 `outbox/<id>.json` → 删除 claimed 文件（= 消费确认）
 - 写 outbox 必须用标准 JSON 序列化，禁止手拼 JSON 字符串；正文里的双引号、换行、反斜杠必须正确转义，否则 daemon 解析失败发不出去
-- claimed 文件 25 分钟没被消费会被重新认领重试
+- claimed 文件超过 `replyTimeoutMin` + 5 分钟（默认 25 分钟，脚本从 config.json 读）没被消费会被重新认领重试
 
 ### 多轮上下文（hook 自带，无需改桥接代码）
 
@@ -135,7 +135,7 @@ inbox 里的消息不会自己处理——部署完 daemon 后必须创建一个
 - 唤醒时按 messageId 写进上下文文件 `~/hooks/state/feishu-wake-*.json`：`{messageId: {ctx_key, summary, turns, compress_needed}}`，payload 只带 `context_file` 路径（上下文可能很大，不塞进 wake 参数）；同一会话里还没回完的前几条也会带上；文件一天后自动删
 - 只按大小限制（512KB，UTF-8 字节，含摘要），不按轮数。超限时给最新那条标 `compress_needed`，worker 回复完后把最旧的几轮压缩成摘要，写 `feishu-ctx-<ctx_key>.summary.json`：`{summary, upto_seq}`，脚本下一轮合并（删掉 seq ≤ upto_seq 的轮）
 - worker 一直没压缩、涨到 2 倍上限时，脚本兜底从最旧的开始丢
-- `/clear`（群里 `@机器人 /clear` 也行）：脚本认领时直接把历史归档（保留 30 天），这条和同会话更早没回完的都不进新历史；用户用自然语言说换话题时，worker 写 `feishu-ctx-<ctx_key>.clear.json`：`{messageId}`，效果相同
+- `/clear`（群里 `@机器人 /clear` 也行）：脚本认领时直接把历史归档（保留 30 天），这条和同会话更早没回完的都不进新历史（按消息时间判断，同一轮认领到的也算）；新历史的 seq 接着编并记 `clear_floor`，清空前发出的压缩请求（`upto_seq` < `clear_floor`）直接丢弃；用户用自然语言说换话题时，worker 写 `feishu-ctx-<ctx_key>.clear.json`：`{messageId}`，效果相同
 - `/compact [重点]`（群里 `@机器人 /compact` 也行）：手动压缩，这条本身不进历史；上下文带 `compact: true`、`compact_hint`、`size_bytes`，并强制 `compress_needed: true`，worker 把 summary 和除最近 2 轮外的带 seq 的轮压成摘要，照常写 `feishu-ctx-<ctx_key>.summary.json`；还在处理中的任务（没 seq 的）不动，回复后照常入历史
 - `/stop`（`@机器人 /stop` 也行）：daemon 直接处理，中断本会话所有没回完的消息——inbox 文件移到 `expired/` 并留 `<id>.stopped`、写墓碑（迟到的回复不发）、写 `stop/<会话>.json`；worker 每步动手前检查自己的 `.claimed` 是否还在，不在就停；脚本收割时把被中断的那条记成"被中断"一轮，之后第一条新消息的上下文带 `after_stop: true`
 - 普通历史 7 天没动自动删；state 全部原子写入；轮询脚本加了 flock，同一时刻只跑一个

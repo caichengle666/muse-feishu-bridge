@@ -167,7 +167,7 @@ async function main(): Promise<number> {
 
   console.log("[onboard] 成功");
   console.log(`[onboard]   App ID：${mask(appId)}（App Secret 已写入 secrets.env，不显示）`);
-  console.log(`[onboard]   白名单 / 主人：${openId ? mask(openId) : "没拿到 open_id，启动后给机器人发条私聊，用 /ids 查到再填 allowedOpenIds"}`);
+  console.log(`[onboard]   白名单 / 主人：${openId ? mask(openId) : "没拿到 open_id：启动后给机器人发条私聊，在 debug.log 里找 daemon.blocked_not_allowed 那行的 sender（ou_ 开头）填进 allowedOpenIds（不在白名单时 /ids 不会回复）"}`);
   console.log(`[onboard]   域名：${next.domain === "lark" ? "lark（国际版）" : "feishu"}`);
   console.log("[onboard] 下一步：npm run check-config && bash keepalive.sh（已在运行的 daemon 要重启才会用新凭证）");
   return 0;

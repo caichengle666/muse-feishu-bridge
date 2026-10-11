@@ -92,6 +92,7 @@ test("卡片：更新被飞书永久拒绝 → 退回新发一张；临时失败
   await writeOutbox(env, "om_c6", { text: "B" });
   await env.bridge.drain();
   assert.ok(!(await ls(env.paths.sent)).includes("om_c6.json"));
+  env.clock.now += 5000; // 退避到点
   await env.bridge.drain();
   await waitFor(async () => (await ls(env.paths.sent)).includes("om_c6.json"));
   const ups = env.t.delivered.filter((c) => c.method === "updateCard" && cardText(c.arg) === "B");

@@ -2,7 +2,7 @@ import { readFileSync, statSync } from "node:fs";
 import { applyAts, type AtTarget } from "./mentions.js";
 import { basename, extname } from "node:path";
 import type { FeishuCardAction, FeishuConfig, FeishuMessage } from "./types.js";
-import { chooseProxy, makeProxyAgent } from "./proxy.js";
+import { applyAxiosProxy, chooseProxy, makeProxyAgent } from "./proxy.js";
 import type { Client, WSClient } from "@larksuiteoapi/node-sdk";
 import { detectImageMime } from "./attachments.js";
 import { debugLog } from "./debug.js";
@@ -50,15 +50,9 @@ export class FeishuTransport {
     const domain = this.config.domain === "lark" ? lark.Domain.Lark : lark.Domain.Feishu;
     const proxy = chooseProxy(this.config.domain === "lark" ? "https://open.larksuite.com" : "https://open.feishu.cn", this.config.proxy);
     const agent = proxy.url ? makeProxyAgent(proxy.url) : undefined;
-    if (agent) {
-      // REST 与长连接握手前的 pullConnectConfig 都走 SDK 的 defaultHttpInstance（axios）
-      const http = (lark as unknown as { defaultHttpInstance?: { defaults: Record<string, unknown> } }).defaultHttpInstance;
-      if (http) {
-        http.defaults.proxy = false;
-        http.defaults.httpsAgent = agent;
-        http.defaults.httpAgent = agent;
-      }
-    }
+    // REST 与长连接握手前的 pullConnectConfig 都走 SDK 的 defaultHttpInstance（axios）
+    const http = (lark as unknown as { defaultHttpInstance?: { defaults: Record<string, unknown> } }).defaultHttpInstance;
+    if (http) applyAxiosProxy(http.defaults, agent);
     debugLog("feishu.proxy", { via: proxy.label, source: proxy.source });
 
     this.sdkClient = new lark.Client({

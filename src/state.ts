@@ -15,7 +15,12 @@ export class SeenStore {
   private readonly q = new SerialQueue();
   private dirty = false;
 
-  constructor(private readonly path: string, private readonly max: number = MAX_SEEN) {}
+  constructor(
+    private readonly path: string,
+    private readonly max: number = MAX_SEEN,
+    /** 落盘失败时回调（磁盘满 / 无权限）：内存里的去重照常生效，不让入站消息因此被丢掉 */
+    private readonly onError?: (e: unknown) => void,
+  ) {}
 
   async load(): Promise<void> {
     try {
@@ -54,7 +59,12 @@ export class SeenStore {
     return this.q.run(async () => {
       if (!this.dirty) return;
       this.dirty = false;
-      await atomicWriteJson(this.path, { seen: [...this.seen].slice(-this.max) });
+      try {
+        await atomicWriteJson(this.path, { seen: [...this.seen].slice(-this.max) });
+      } catch (e) {
+        this.dirty = true; // 下次再写
+        this.onError?.(e);
+      }
     });
   }
 }
@@ -209,11 +219,12 @@ export interface Route {
  * 回复路由表（routes.json）：inbox id → 回复目标。
  * 普通消息 replyTo = 自己的 message_id；卡片点击的 inbox id 是合成的（card_<hash>），
  * replyTo = 被点击的那张卡片的 open_message_id——原版直接拿合成 id 去调 reply 接口，必然失败。
- * 带 TTL（默认 3 天）与容量上限，原子写。
+ * 带 TTL（默认 3 天）与容量上限，原子写；并发的写入合并成一次（只写最新状态）。
  */
 export class RouteStore {
   private m = new Map<string, Route>();
   private readonly q = new SerialQueue();
+  private dirty = false;
   constructor(
     private readonly path: string | null,
     private readonly ttlMs = 3 * 24 * 3600_000,
@@ -255,7 +266,14 @@ export class RouteStore {
   persist(): Promise<void> {
     if (!this.path) return Promise.resolve();
     const path = this.path;
-    return this.q.run(() => atomicWriteJson(path, { routes: Object.fromEntries(this.m) })).catch(() => undefined);
+    this.dirty = true;
+    return this.q
+      .run(async () => {
+        if (!this.dirty) return; // 前一次写入已包含这次的改动
+        this.dirty = false;
+        await atomicWriteJson(path, { routes: Object.fromEntries(this.m) });
+      })
+      .catch(() => undefined);
   }
 }
 

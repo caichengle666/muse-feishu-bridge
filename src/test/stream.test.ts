@@ -181,3 +181,87 @@ test("流式：不安全的文件名、没有路由的文件被忽略/清理", a
   assert.equal(existsSync(join(env.paths.stream, "om_unknown.jsonl")), false);
   assert.equal(env.t.delivered.length, 0);
 });
+
+test("M1 卡片点击的流式回复：处理中卡发到原卡片消息（route.replyTo），不是合成的 card_ id；CardKit 不被关掉", async () => {
+  const t = new KitTransport();
+  const env = await makeEnv({ config: CFG, ackDelayMs: 60_000, t });
+  await env.bridge.onCardAction({ messageId: "om_orig", chatId: "oc_1", operatorOpenId: "ou_owner", eventId: "ev_m1", value: { k: 1 } });
+  const id = [...env.routes.entries()].map(([k]) => k).find((k) => k.startsWith("card_"))!;
+  assert.ok(id);
+  await stream(env, id, "点击后的输出");
+  await env.bridge.pumpStreams();
+  const replies = t.calls.filter((c) => c.method === "replyCardEntity" || c.method === "replyCard");
+  assert.deepEqual(replies.map((c) => c.target), ["om_orig"]);
+  assert.ok(env.routes.get(id)?.cardId, "用上了 CardKit 卡片实体");
+  assert.ok(!env.logs.some((l) => l.event === "daemon.cardkit_disabled"));
+});
+
+test("M1 replyCardEntity 永久失败（如原消息已撤回）只让这一条退回普通卡片，不全局关掉 CardKit；非权限的创建失败同理", async () => {
+  const t = new KitTransport();
+  const env = await makeEnv({ config: CFG, ackDelayMs: 10, t });
+  t.failNext("replyCardEntity", httpError(400, 230011, "message recalled"));
+  await env.bridge.onMessage(textMsg("om_r1", "hi"));
+  await waitFor(() => Boolean(env.routes.get("om_r1")?.cardMessageId));
+  assert.equal(env.routes.get("om_r1")!.cardId, undefined, "这一条退回普通卡片");
+  assert.deepEqual(t.calls.filter((c) => c.method === "replyCard").map((c) => c.target), ["om_r1"]);
+
+  t.failNext("createCardEntity", httpError(400, 230099, "bad card"));
+  await env.bridge.onMessage(textMsg("om_r2", "hi"));
+  await waitFor(() => Boolean(env.routes.get("om_r2")?.cardMessageId));
+  assert.equal(env.routes.get("om_r2")!.cardId, undefined);
+
+  await env.bridge.onMessage(textMsg("om_r3", "hi"));
+  await waitFor(() => Boolean(env.routes.get("om_r3")?.cardMessageId));
+  assert.ok(env.routes.get("om_r3")!.cardId, "下一条消息照常用 CardKit");
+  assert.ok(!env.logs.some((l) => l.event === "daemon.cardkit_disabled"));
+
+  t.failNext("createCardEntity", httpError(403, undefined, "forbidden"));
+  await env.bridge.onMessage(textMsg("om_r4", "hi"));
+  await waitFor(() => Boolean(env.routes.get("om_r4")?.cardMessageId));
+  assert.ok(env.logs.some((l) => l.event === "daemon.cardkit_disabled"), "HTTP 403 才算没权限");
+});
+
+test("L4 流式推送失败不算已显示：下一轮（过了节流）重推同一段文本", async () => {
+  const t = new KitTransport();
+  const env = await makeEnv({ config: CFG, ackDelayMs: 10, t });
+  await env.bridge.onMessage(textMsg("om_l4", "hi"));
+  await waitFor(() => Boolean(env.routes.get("om_l4")?.cardId));
+  await stream(env, "om_l4", "最后一段");
+  t.failNext("updateCardEntity", httpError(503));
+  await env.bridge.pumpStreams();
+  assert.ok(env.logs.some((l) => l.event === "daemon.stream_failed"));
+  assert.equal(t.kit.filter((k) => k.op === "update").length, 0);
+  env.clock.now += 1000;
+  await env.bridge.pumpStreams();
+  const ups = t.kit.filter((k) => k.op === "update");
+  assert.equal(ups.length, 1);
+  assert.equal(cardText(ups[0].arg), "最后一段");
+});
+
+test("L6 CardKit sequence 按段预留落盘：流式推送不再每次重写 routes.json；重启后仍严格递增", async () => {
+  const t = new KitTransport();
+  const env = await makeEnv({ config: CFG, ackDelayMs: 10, t });
+  await env.bridge.onMessage(textMsg("om_l6", "hi"));
+  await waitFor(() => Boolean(env.routes.get("om_l6")?.cardId));
+  let writes = 0;
+  const origSet = env.routes.set.bind(env.routes);
+  env.routes.set = (id, r) => (writes++, origSet(id, r));
+  for (let i = 0; i < 10; i++) {
+    await stream(env, "om_l6", `段${i}`);
+    env.clock.now += 1000;
+    await env.bridge.pumpStreams();
+  }
+  const used = t.kit.filter((k) => k.cardId === "card_1" && k.seq !== undefined).map((k) => k.seq!);
+  assert.ok(used.length >= 10);
+  assert.ok(writes <= 3, `routes 写入 ${writes} 次`);
+  await env.routes.persist();
+  // 重启：新 bridge 读同一个 routes.json，接着推的 sequence 必须大于用过的
+  const t2 = new KitTransport();
+  const env2 = await makeEnv({ config: CFG, ackDelayMs: 60_000, t: t2, root: env.root });
+  await stream(env2, "om_l6", "重启后");
+  env2.clock.now = env.clock.now + 1000;
+  await env2.bridge.pumpStreams();
+  const after = t2.kit.filter((k) => k.seq !== undefined).map((k) => k.seq!);
+  assert.ok(after.length > 0);
+  assert.ok(Math.min(...after) > Math.max(...used));
+});

@@ -48,3 +48,15 @@ export function chooseProxy(target: string, cfgProxy: string | undefined, env: N
 export function makeProxyAgent(url: string): HttpsProxyAgent<string> {
   return new HttpsProxyAgent(url, { keepAlive: true });
 }
+
+/**
+ * 给 axios 默认配置挂代理：始终关掉 axios 自己读 HTTP(S)_PROXY 的逻辑（proxy=false），
+ * 有代理时用 CONNECT 隧道 agent；没有（"off"、NO_PROXY、未配置）就是真正直连。
+ */
+export function applyAxiosProxy(defaults: Record<string, unknown>, agent: object | undefined): void {
+  defaults.proxy = false;
+  if (agent) {
+    defaults.httpsAgent = agent;
+    defaults.httpAgent = agent;
+  }
+}

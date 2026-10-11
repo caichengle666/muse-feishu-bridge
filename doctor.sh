@@ -17,7 +17,7 @@ HOOK_ID="feishu-inbox-watch"
 # ---- 运行环境 ----
 if command -v node >/dev/null 2>&1; then
   major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-  if [ "${major:-0}" -ge 18 ] 2>/dev/null; then ok "Node.js $(node -v)"; else fail "Node.js 版本过低（$(node -v)），需要 18+"; fi
+  if [ "${major:-0}" -ge 20 ] 2>/dev/null; then ok "Node.js $(node -v)"; else fail "Node.js 版本过低（$(node -v)），需要 20+"; fi
 else
   fail "找不到 node"
 fi
@@ -28,7 +28,9 @@ if [ -f dist/daemon.js ]; then
 else
   fail "没编译：npm run build"
 fi
-command -v jq >/dev/null 2>&1 && ok "jq 可用（hook 需要）" || fail "找不到 jq，hook 脚本跑不起来"
+HAS_JQ=0
+if command -v jq >/dev/null 2>&1; then HAS_JQ=1; ok "jq 可用（hook 需要）"; else fail "找不到 jq，hook 脚本跑不起来"; fi
+command -v python3 >/dev/null 2>&1 && ok "python3 可用（hook 维护多轮上下文需要）" || fail "找不到 python3：hook 照常唤醒，但多轮上下文、/clear、/compact 全部失效"
 
 # ---- 凭证与配置 ----
 if [ -f secrets.env ]; then
@@ -43,9 +45,15 @@ else
   fail "没有 secrets.env：npm run onboard 扫码建应用"
 fi
 if [ -f config.json ]; then
-  if jq -e . config.json >/dev/null 2>&1; then
-    n="$(jq '[.allowedOpenIds // [] | .[] | select(type == "string" and startswith("ou_") and . != "ou_xxx")] | length' config.json)"
-    [ "${n:-0}" -gt 0 ] && ok "白名单 $n 人" || fail "config.json 的 allowedOpenIds 为空或还是占位符 ou_xxx（daemon 会拒绝启动）"
+  if [ "$HAS_JQ" -eq 0 ]; then
+    warn "没有 jq，跳过 config.json 内容检查（npm run check-config 可以查）"
+  elif jq -e . config.json >/dev/null 2>&1; then
+    n="$(jq '[.allowedOpenIds // [] | .[] | select(type == "string" and startswith("ou_") and (test("^ou_x+$"; "i") | not))] | length' config.json)"
+    placeholder="$(jq '[.allowedOpenIds // [] | .[] | select(type == "string" and test("^ou_x+$"; "i"))] | length' config.json)"
+    if [ "${placeholder:-0}" -gt 0 ] && [ "${n:-0}" -gt 0 ]; then warn "白名单 $n 人，另有占位符 ou_xxx 没删（不影响使用，可以删掉）"
+    elif [ "${placeholder:-0}" -gt 0 ]; then fail "config.json 的 allowedOpenIds 里还是占位符 ou_xxx：daemon 能启动，但所有人的消息都会被拦下。给机器人发条私聊，在 debug.log 里找 daemon.blocked_not_allowed 那行的 sender（ou_ 开头）填进去后重启"
+    elif [ "${n:-0}" -gt 0 ]; then ok "白名单 $n 人"
+    else fail "config.json 的 allowedOpenIds 为空（daemon 会拒绝启动）"; fi
     [ "$(jq -r '.streamReplies // true' config.json)" = "false" ] && warn "streamReplies=false：流式打字机已关闭"
   else
     fail "config.json 不是合法 JSON"

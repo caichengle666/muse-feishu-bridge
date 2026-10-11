@@ -45,12 +45,19 @@ function fmtDuration(ms: number): string {
   return d ? `${d}天${h}小时` : h ? `${h}小时${m}分` : `${m}分${s % 60}秒`;
 }
 
+/** 由 hook 处理的命令（照常进 inbox，桥接不拦截），只为出现在 /help 里 */
+const HOOK_COMMANDS: Record<string, { desc: string }> = {
+  clear: { desc: "清空本会话的对话历史，换个新话题" },
+  compact: { desc: "压缩本会话较早的对话历史（可在后面写要保留的重点）：/compact [重点]" },
+};
+
 type Handler = (ctx: SlashContext, args: string) => Promise<string> | string;
 
 const COMMANDS: Record<string, { desc: string; run: Handler }> = {
   help: {
     desc: "显示本帮助",
-    run: () => "可用命令：\n" + Object.entries(COMMANDS).map(([k, v]) => `/${k} - ${v.desc}`).join("\n"),
+    run: () =>
+      "可用命令：\n" + [...Object.entries(COMMANDS), ...Object.entries(HOOK_COMMANDS)].map(([k, v]) => `/${k} - ${v.desc}`).join("\n"),
   },
   ping: { desc: "测试连通性", run: () => "pong 🏓" },
   // 实际由 bridge.ts 的 handleStop 处理（要动 inbox/outbox），这里只为出现在 /help 里

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { makeEnv, textMsg, writeOutbox, waitFor, ls, readJson, sleep, httpError } from "./helpers.js";
 import { splitReplyText } from "../textsplit.js";
 import { FeishuApiError, assertOk, isPermanentFeishuError, isRetryableFeishuError } from "../feishu-retry.js";
-import { runDelivery, partUuid, OutboxStore, type Channel } from "../outbox.js";
+import { runDelivery, partUuid, retryBackoffMs, OutboxStore, type Channel } from "../outbox.js";
 import { loadSecrets, parseEnvFile, validateConfig } from "../config.js";
 import { SeenStore } from "../state.js";
 import { resolveMentions } from "../bridge.js";
@@ -48,9 +48,10 @@ test("P0-2 发送失败不再被当作已发归档：永久错误进 failed/ 并
   const r1 = await env.bridge.drain();
   assert.deepEqual(r1.retry, ["om_t"]);
   assert.ok((await ls(env.paths.outbox)).includes("om_t.json"), "临时错误：放回 outbox");
+  env.clock.now += 5000; // 退避到点
   await env.bridge.drain();
   assert.ok((await ls(env.paths.sent)).includes("om_t.json"));
-  assert.deepEqual(env.t.texts(), ["hello"]);
+  assert.deepEqual(env.t.texts(), ["抱歉，这条回复没能发出去（已记录到 failed/），可以让助手重发。", "hello"], "经典模式文字永久失败会通知一句；临时失败的那条重试后只发一次");
 });
 
 test("P0-3 部分成功不会从头重发：第 1 段已发、第 2 段临时失败 → 下次只补第 2 段起", async () => {
@@ -63,6 +64,7 @@ test("P0-3 部分成功不会从头重发：第 1 段已发、第 2 段临时失
   const r1 = await env.bridge.drain();
   assert.deepEqual(r1.retry, ["om_s"]);
   assert.deepEqual(env.t.texts(), [parts[0]]);
+  env.clock.now += 5000;
   await env.bridge.drain();
   const sends = env.t.calls.filter((c) => c.method === "replyText");
   assert.equal(sends.length, parts.length + 1, "第 1 段没有被重发，只有失败的第 2 段多试了一次");
@@ -242,6 +244,7 @@ test("P1-11 半截 JSON（助手非原子写）计次重试，不当成空回复
   await env.bridge.drain();
   assert.equal(env.t.calls.length, 0);
   await writeOutbox(env, "om_h", { text: "完整" });
+  env.clock.now += 5000;
   await env.bridge.drain();
   assert.deepEqual(env.t.texts(), ["完整"]);
 });
@@ -286,7 +289,7 @@ test("P1-12 飞书错误分类：HTTP 200 + code≠0 也算失败；限频/网�
   assert.equal(isPermanentFeishuError(new Error("奇怪的本地错误")), false, "未知错误按临时处理（有次数上限）");
 });
 
-test("P1-13 临时错误按窗口计次：同一部件 1 小时内失败 5 次进 failed/", async () => {
+test("P1-13 临时错误按窗口计次：同一部件 1 小时内失败 8 次进 failed/", async () => {
   const dir = await mkdtemp(join(tmpdir(), "mfb-ob-"));
   const store = new OutboxStore({ outbox: join(dir, "o"), sent: join(dir, "s"), failed: join(dir, "f"), expired: join(dir, "e"), progress: join(dir, "p"), inflight: join(dir, "i") });
   await store.init();
@@ -294,11 +297,69 @@ test("P1-13 临时错误按窗口计次：同一部件 1 小时内失败 5 次�
   const ch: Channel = { sendText: async () => { throw httpError(503); }, sendFile: async () => undefined, sendCard: async () => undefined, notify: async () => undefined };
   let now = 1_000_000;
   const results: string[] = [];
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 8; i++) {
     const r = await runDelivery(store, { messageId: "om_w", text: "x" }, ch, { root: dir, allowedRoots: [], now: () => (now += 1000) });
     results.push(r.status);
   }
-  assert.deepEqual(results, ["retry", "retry", "retry", "retry", "failed"]);
+  assert.deepEqual(results, [...Array(7).fill("retry"), "failed"]);
+});
+
+test("H1 临时失败指数退避：5 秒起翻倍、封顶 5 分钟；没到点的排空跳过，十几秒断网不会耗光重试", async () => {
+  assert.deepEqual([1, 2, 3, 4, 5, 6, 7, 8].map(retryBackoffMs), [5000, 10000, 20000, 40000, 80000, 160000, 300000, 300000]);
+  const env = await makeEnv();
+  await env.bridge.onMessage(textMsg("om_bo", "hi"));
+  await writeOutbox(env, "om_bo", { text: "答复" });
+  const net = () => Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+  env.t.failNext("replyText", net(), 2);
+  const r1 = await env.bridge.drain();
+  assert.deepEqual(r1.retry, ["om_bo"]);
+  // 1 秒一次的排空在退避期内不会再调用飞书
+  for (let i = 0; i < 4; i++) {
+    env.clock.now += 1000;
+    const r = await env.bridge.drain();
+    assert.deepEqual([...r.retry, ...r.failed, ...r.sent], []);
+  }
+  assert.equal(env.t.calls.filter((c) => c.method === "replyText").length, 1);
+  env.clock.now += 1000; // 满 5 秒
+  assert.deepEqual((await env.bridge.drain()).retry, ["om_bo"]);
+  env.clock.now += 9000; // 第二次失败后要等 10 秒
+  assert.deepEqual((await env.bridge.drain()).sent, []);
+  env.clock.now += 1000;
+  assert.deepEqual((await env.bridge.drain()).sent, ["om_bo"]);
+  assert.deepEqual(env.t.texts(), ["答复"]);
+});
+
+test("H1 经典模式：临时错误重试耗尽进 failed/ 时告诉用户，不再静默丢失", async () => {
+  const env = await makeEnv();
+  await env.bridge.onMessage(textMsg("om_ff", "hi"));
+  await writeOutbox(env, "om_ff", { text: "答复" });
+  env.t.failNext("replyText", httpError(503), 8);
+  const statuses: string[] = [];
+  for (let i = 0; i < 8; i++) {
+    const r = await env.bridge.drain();
+    statuses.push(r.failed.length ? "failed" : r.retry.length ? "retry" : "none");
+    env.clock.now += 300_000;
+  }
+  assert.deepEqual(statuses, [...Array(7).fill("retry"), "failed"]);
+  assert.ok((await ls(env.paths.failed)).includes("om_ff.json"));
+  assert.ok(env.t.texts().some((t) => t.includes("没能发出去")), "最终失败通知了用户");
+});
+
+test("L5 resolveMentions：10 个以上 @ 时 @_user_1 不会吃掉 @_user_10 / @_user_11 的开头", () => {
+  const ms = Array.from({ length: 11 }, (_, i) => ({ key: `@_user_${i + 1}`, name: `N${i + 1}`, id: { open_id: `ou_${i + 1}` } }));
+  const text = ms.map((m) => m.key).join(" ");
+  assert.equal(resolveMentions(text, ms), ms.map((m) => `@${m.name}`).join(" "));
+  assert.equal(resolveMentions("$& @_user_1", [{ key: "@_user_1", name: "A$&B" }]), "$& @A$&B", "名字里的 $ 不被当成替换模式");
+});
+
+test("L3 seen.json 写失败不丢消息：内存去重照常，回调报错", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mfb-seen-"));
+  await writeFile(join(dir, "file"), "x");
+  const errs: unknown[] = [];
+  const s = new SeenStore(join(dir, "file", "seen.json"), undefined, (e) => errs.push(e)); // 父路径是文件，写必然失败
+  assert.equal(await s.add("om_1"), true);
+  assert.equal(await s.add("om_1"), false);
+  assert.equal(errs.length, 1);
 });
 
 // ------------------------------------------------------------ 配置
@@ -346,9 +407,14 @@ test("P3-1 斜杠命令：白名单用户的 /ping /help /status 由 daemon 直�
   const replies = (id: string) => env.t.calls.filter((c) => c.method === "replyText" && c.target === id).map((c) => String(c.arg));
   assert.deepEqual(replies("om_s1"), ["pong 🏓"]);
   assert.ok(replies("om_s2")[0].includes("/status"));
+  assert.ok(replies("om_s2")[0].includes("/clear") && replies("om_s2")[0].includes("/compact"), "/help 也列出 hook 处理的命令");
+  await env.bridge.onMessage(textMsg("om_s7", "/clear"));
+  await env.bridge.onMessage(textMsg("om_s8", "/compact 保留部署步骤"));
+  assert.deepEqual(replies("om_s7"), [], "/clear /compact 不被桥接拦截，照常进 inbox 交给 hook");
+  assert.ok((await ls(env.paths.inbox)).includes("om_s8.json"));
   assert.ok(replies("om_s3")[0].includes("长连接") && replies("om_s3")[0].includes("待处理"));
   assert.deepEqual(replies("om_s6"), []);
-  assert.deepEqual(await ls(env.paths.inbox), ["om_s4.json", "om_s5.json"]);
+  assert.deepEqual(await ls(env.paths.inbox), ["om_s4.json", "om_s5.json", "om_s7.json", "om_s8.json"]);
 });
 
 test("E3 代理选择：HTTPS_PROXY 生效、NO_PROXY 命中直连、config 可强制 off / 覆盖；日志地址不含账号密码", async () => {
@@ -363,6 +429,20 @@ test("E3 代理选择：HTTPS_PROXY 生效、NO_PROXY 命中直连、config 可�
   assert.equal(chooseProxy(T, "off", { HTTPS_PROXY: "http://px:1" }).url, null);
   assert.equal(chooseProxy(T, "http://cfg:8080", { HTTPS_PROXY: "http://px:1" }).url, "http://cfg:8080");
   assert.equal(redact("http://a:b@h:1/x"), "http://h:1");
+});
+
+test("M3 config.proxy=off / NO_PROXY：axios 的 proxy 也必须是 false（否则它会自己读 HTTPS_PROXY 走绝对 URI 转发）", async () => {
+  const { applyAxiosProxy } = await import("../proxy.js");
+  const direct: Record<string, unknown> = {};
+  applyAxiosProxy(direct, undefined);
+  assert.equal(direct.proxy, false);
+  assert.equal(direct.httpsAgent, undefined);
+  const agent = {};
+  const via: Record<string, unknown> = {};
+  applyAxiosProxy(via, agent);
+  assert.equal(via.proxy, false);
+  assert.equal(via.httpsAgent, agent);
+  assert.equal(via.httpAgent, agent);
 });
 
 test("E3 长连接真的走代理：ws 挂上 agent 后经 CONNECT 隧道连通（不挂则 ws 无视 HTTPS_PROXY）", async () => {

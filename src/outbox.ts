@@ -14,7 +14,9 @@
  *   - 每个部件带飞书 reply 的 uuid 幂等键 = sha256(id|部件)：即使"已发出但进度未落盘时崩溃"，
  *     恢复后重发也会被飞书按 uuid 去重（1 小时内），不会出现重复消息；
  *   - 永久错误（本地校验失败 / 飞书 4xx / 业务错误码）→ 该部件记失败、通知用户、其余部件照发，最后进 failed/；
- *   - 临时错误（限频、断网、5xx…）→ 按部件、按时间窗口计数（默认 1 小时 5 次），成功即清零；超限进 failed/；
+ *   - 临时错误（限频、断网、5xx…）→ 按部件、按时间窗口计数（默认 1 小时 8 次），成功即清零；超限进 failed/；
+ *     每次失败后按指数退避（5 秒起翻倍，最多 5 分钟）写 nextAttemptAt，排空时没到点的跳过——
+ *     断网 / 代理重启十几秒不会把重试次数瞬间耗光；
  *   - 超时：写墓碑 expired/<id>.tombstone；之后迟到的回复直接移到 expired/，发送中的在部件之间看到墓碑即停止；
  *   - 崩溃恢复：拿到单实例锁后 recoverInflight()：inflight/* 移回 outbox/ 续发，有墓碑的进 expired/。
  */
@@ -85,6 +87,8 @@ export interface Progress {
   /** 每个部件的临时失败时间戳（只保留窗口内），部件成功即删除 */
   partFailures: Record<string, number[]>;
   lastError?: string;
+  /** 临时失败后的退避：这个时间（ms）之前排空不重试 */
+  nextAttemptAt?: number;
   updatedAt?: string;
 }
 
@@ -156,6 +160,7 @@ export class OutboxStore {
         attempts: typeof p.attempts === "number" ? p.attempts : 0,
         partFailures: pf,
         ...(p.lastError ? { lastError: p.lastError } : {}),
+        ...(typeof p.nextAttemptAt === "number" ? { nextAttemptAt: p.nextAttemptAt } : {}),
       };
     } catch {
       return { done: [], failedParts: [], attempts: 0, partFailures: {} };
@@ -206,7 +211,7 @@ export class OutboxStore {
 
   /** 永久失败：inflight（或 outbox）→ failed/<id>.json，并写 failed/<id>.reason.json */
   async fail(id: string, reason: string, progress?: Progress): Promise<void> {
-    await this.moveOut(id, join(this.dirs.failed, `${id}.json`)).catch(() => undefined);
+    // 先写原因再移文件：看到 failed/<id>.json 时原因一定已在
     await mkdir(this.dirs.failed, { recursive: true });
     await atomicWriteJson(join(this.dirs.failed, `${id}.reason.json`), {
       messageId: id,
@@ -214,6 +219,7 @@ export class OutboxStore {
       ...(progress ? { done: progress.done, failedParts: progress.failedParts, attempts: progress.attempts } : {}),
       at: new Date().toISOString(),
     }).catch(() => undefined);
+    await this.moveOut(id, join(this.dirs.failed, `${id}.json`)).catch(() => undefined);
     await this.clearProgress(id);
   }
 
@@ -293,6 +299,9 @@ export class OutboxStore {
 
 // ---------------------------------------------------------------- engine
 
+/** 同一部件在窗口内临时失败这么多次进 failed/（配合退避约 10 分钟） */
+export const DEFAULT_MAX_ATTEMPTS = 8;
+
 /** 发送通道（飞书只有一种：reply 到某条消息）。uuid 为飞书幂等键。 */
 export interface Channel {
   /** info：第几段 / 共几段（0 基 index），卡片模式用来决定"原地更新确认卡"还是新发一张 */
@@ -301,6 +310,8 @@ export interface Channel {
   sendCard(card: Record<string, unknown>, uuid: string): Promise<void>;
   /** 尽力通知用户（失败忽略） */
   notify(text: string): Promise<void>;
+  /** 最终失败时是否由引擎通知用户（经典模式；卡片模式由状态卡显示失败，不再另发） */
+  notifyOnFail?: boolean;
   /** 覆盖文本分段长度（@ 机器人接力时整段一条发，免得后面几段对方收不到） */
   textChunkChars?: number;
 }
@@ -311,7 +322,7 @@ export interface EngineOptions {
   maxAttempts?: number;
   maxFileBytes?: number;
   chunkChars?: number;
-  /** 临时错误计数窗口，默认 1 小时（窗口内同一部件失败 maxAttempts 次 → failed/） */
+  /** 临时错误计数窗口，默认 1 小时（窗口内同一部件失败 maxAttempts 次 → failed/）；maxAttempts 默认 DEFAULT_MAX_ATTEMPTS */
   attemptWindowMs?: number;
   /** 时钟（测试注入） */
   now?: () => number;
@@ -327,16 +338,24 @@ export type DeliveryResult =
   /** outbox/inflight 都没有该文件（且不在 sent/failed/expired） */
   | { status: "missing" };
 
+/** 第 n 次（1 基）临时失败后的退避：5 秒起翻倍，最多 5 分钟。 */
+export function retryBackoffMs(n: number): number {
+  return Math.min(5000 * 2 ** Math.max(0, n - 1), 300_000);
+}
+
 /**
- * 记一次临时失败（按部件、按时间窗口）。返回窗口内次数。
+ * 记一次临时失败（按部件、按时间窗口），并按次数设好下次重试时间。返回窗口内次数。
  */
 export function recordTransientFailure(prog: Progress, key: string, now: number, windowMs: number): number {
   const arr = (prog.partFailures[key] || []).filter((t) => now - t < windowMs);
   arr.push(now);
   prog.partFailures[key] = arr;
   prog.attempts = arr.length;
+  prog.nextAttemptAt = now + retryBackoffMs(arr.length);
   return arr.length;
 }
+
+const FINAL_FAIL_TEXT = "抱歉，这条回复没能发出去（已记录到 failed/），可以让助手重发。";
 
 interface Part {
   key: string;
@@ -407,7 +426,7 @@ async function runDeliveryLocked(
 ): Promise<DeliveryResult> {
   const id = payload.messageId;
   const log = opts.log || (() => undefined);
-  const maxAttempts = opts.maxAttempts ?? 5;
+  const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   const windowMs = opts.attemptWindowMs ?? 3600_000;
   const now = opts.now ?? Date.now;
 
@@ -445,6 +464,7 @@ async function runDeliveryLocked(
         prog.done.push(part.key);
         delete prog.partFailures[part.key]; // 成功即清零
         prog.attempts = 0;
+        delete prog.nextAttemptAt;
         await store.saveProgress(id, prog);
       } catch (e) {
         const reason = describeFeishuError(e);
@@ -464,6 +484,7 @@ async function runDeliveryLocked(
         if (n >= maxAttempts) {
           const why = `临时错误在 ${Math.round(windowMs / 60000)} 分钟内重试 ${n} 次仍失败：${prog.lastError}`;
           await store.fail(id, why, prog);
+          if (ch.notifyOnFail) await ch.notify(FINAL_FAIL_TEXT).catch(() => undefined);
           return { status: "failed", reason: why };
         }
         await store.saveProgress(id, prog);
@@ -480,6 +501,8 @@ async function runDeliveryLocked(
   if (prog.failedParts.length) {
     const why = prog.failedParts.map((f) => `${f.part}: ${f.reason}`).join("; ");
     await store.fail(id, why, prog);
+    // 文件 / 卡片失败已单独通知过；文字失败（用户什么都没收到）在经典模式下补一句
+    if (ch.notifyOnFail && prog.failedParts.some((f) => f.part.startsWith("text:"))) await ch.notify(FINAL_FAIL_TEXT).catch(() => undefined);
     return { status: "failed", reason: why };
   }
   await store.archive(id);
@@ -542,6 +565,7 @@ export class OutboxDrainer {
   private async drainOnce(rep: DrainReport): Promise<void> {
     const { store, engine } = this.d;
     const log = engine.log || (() => undefined);
+    const now = engine.now ?? Date.now;
     let files: string[];
     try {
       files = (await readdir(store.dirs.outbox)).filter((f) => f.endsWith(".json")).sort();
@@ -566,6 +590,8 @@ export class OutboxDrainer {
           await store.clearProgress(id);
           continue;
         }
+        const due = (await store.loadProgress(id)).nextAttemptAt;
+        if (due !== undefined && due > now()) continue; // 临时失败退避中
         let raw: string;
         try {
           raw = await readFile(path, "utf8");
@@ -578,9 +604,9 @@ export class OutboxDrainer {
         } catch (e) {
           // 可能是非原子写入的半截文件：按临时错误计次，超限进 failed/
           const prog = await store.loadProgress(id);
-          recordTransientFailure(prog, "parse", (engine.now ?? Date.now)(), engine.attemptWindowMs ?? 3600_000);
+          recordTransientFailure(prog, "parse", now(), engine.attemptWindowMs ?? 3600_000);
           prog.lastError = `JSON 解析失败: ${errText(e)}`;
-          if (prog.attempts >= (engine.maxAttempts ?? 5)) {
+          if (prog.attempts >= (engine.maxAttempts ?? DEFAULT_MAX_ATTEMPTS)) {
             await store.fail(id, prog.lastError, prog);
             rep.failed.push(id);
           } else {

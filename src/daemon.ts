@@ -110,7 +110,7 @@ async function main(): Promise<void> {
   const recovered = await outbox.recoverInflight();
   if (recovered.requeued.length || recovered.expired.length) log("daemon.inflight_recovered", recovered);
 
-  const seen = new SeenStore(paths.seen);
+  const seen = new SeenStore(paths.seen, undefined, (e) => log("daemon.seen_save_failed", { error: errText(e) }));
   await seen.load();
   const routes = new RouteStore(paths.routes);
   routes.loadSync();

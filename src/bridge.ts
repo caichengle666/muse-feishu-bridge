@@ -24,7 +24,7 @@ import { pruneOldFiles, errText, atomicWriteJson, SerialQueue } from "./fsutil.j
 import { parseSlashCommand, runSlashCommand } from "./slash.js";
 import { buildReplyCard, fmtClock, fmtElapsed, CONTENT_ELEMENT_ID, type ReplyCardInput } from "./reply-card.js";
 import { parseStreamText, streamDisplayText } from "./stream.js";
-import { isPermanentFeishuError } from "./feishu-retry.js";
+import { feishuCodeOf, httpStatusOf, isPermanentFeishuError } from "./feishu-retry.js";
 import { extractMentions, findPeer, type PeerBot, mentionsOpenId, parseHop, resolveAts, type AtTarget } from "./mentions.js";
 import { resolveAllowedRoots } from "./files.js";
 import type { Paths } from "./paths.js";
@@ -86,6 +86,12 @@ export function stopFileName(chatId: string): string {
   return `${k}.json`;
 }
 
+/** CardKit 权限不足（没开 cardkit:card:write / 应用无权限）：HTTP 403 或 99991672 / 99991679 */
+export function isCardkitPermissionError(e: unknown): boolean {
+  const code = feishuCodeOf(e);
+  return httpStatusOf(e) === 403 || code === 99991672 || code === 99991679;
+}
+
 function sha(s: string): string {
   return createHash("sha256").update(s).digest("hex");
 }
@@ -100,7 +106,10 @@ export function resolveMentions(text: string, mentions: unknown, botOpenId?: str
   for (const m of mentions as { key?: string; name?: string; id?: { open_id?: string } }[]) {
     if (!m || typeof m.key !== "string" || !m.key) continue;
     const isBot = Boolean(botOpenId) && m.id?.open_id === botOpenId;
-    out = out.split(m.key).join(isBot ? (markSelf ? `@${m.name || "我"}（你）` : "") : `@${m.name || "某人"}`);
+    const repl = isBot ? (markSelf ? `@${m.name || "我"}（你）` : "") : `@${m.name || "某人"}`;
+    // 键后面紧跟数字的不算（@_user_1 不能吃掉 @_user_10 的开头）
+    const key = m.key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    out = out.replace(new RegExp(key + "(?!\\d)", "g"), () => repl);
   }
   return out.replace(/^\s+/, "").replace(/[ \t]{2,}/g, " ");
 }
@@ -200,6 +209,7 @@ export function createBridge(d: BridgeDeps): Bridge {
 
   const setRoute = async (id: string, patch: Partial<Pick<Route, "cardMessageId" | "cardFinal" | "cardId" | "cardSeq" | "cardStreaming">>) => {
     const r = d.routes.get(id);
+    if (patch.cardFinal) usedSeq.delete(id); // 随时可删：重新从预留上限往后编，仍然严格递增
     if (r) await d.routes.set(id, { ...r, ...patch });
   };
   const elapsedFooter = (id: string): string[] => {
@@ -230,9 +240,17 @@ export function createBridge(d: BridgeDeps): Bridge {
     });
     return run;
   }
+  /**
+   * CardKit sequence（每张卡严格递增，重启后也不能回退）。只在用完预留段时落盘：
+   * routes.json 里记的是"预留到的上限"，重启后从上限往后编；流式时不必每次推送都重写 routes.json。
+   */
+  const SEQ_RESERVE = 50;
+  const usedSeq = new Map<string, number>();
   const nextSeq = async (id: string): Promise<number> => {
-    const seq = (d.routes.get(id)?.cardSeq ?? 0) + 1;
-    await setRoute(id, { cardSeq: seq });
+    const reserved = d.routes.get(id)?.cardSeq ?? 0;
+    const seq = (usedSeq.get(id) ?? reserved) + 1;
+    usedSeq.set(id, seq);
+    if (seq > reserved) await setRoute(id, { cardSeq: seq + SEQ_RESERVE - 1 });
     return seq;
   };
   /** 更新状态卡（须在 withCardLock 内调用）：卡片实体走 CardKit（先关流式），否则 PATCH。 */
@@ -324,6 +342,8 @@ export function createBridge(d: BridgeDeps): Bridge {
     // @ 了主人和发送者以外的人：对方可能是没登记的机器人（飞书事件分不出人和机器人），卡片里的 @ 叫不动机器人，所以发纯文本
     const plainText = handoff || targets.some((x) => x.id !== ownerOpenId && x.id !== r?.senderOpenId);
     const firstAts = [...targets, ...ownerAts];
+    // 最终发送失败要不要由引擎告诉用户：经典模式要；卡片模式有状态卡时由 finalizeCards 改卡，没有卡才要
+    const notifyOnFail = () => !cardMode || !d.routes.get(p.messageId)?.cardMessageId;
     if (plainText) {
       // @ 机器人（或可能是机器人的人）：整段作为一条纯文本发（对方只能收到 @ 它的那条消息；卡片里的 @ 不触发机器人）
       return {
@@ -336,6 +356,9 @@ export function createBridge(d: BridgeDeps): Bridge {
         sendFile: async (path, uuid) => void (await t.replyLocalFile(replyTo, path, uuid)),
         sendCard: async (c, uuid) => void (await t.replyCard(replyTo, c, uuid)),
         notify: (text) => t.replyText(replyTo, text).catch(() => undefined),
+        get notifyOnFail() {
+          return notifyOnFail();
+        },
       };
     }
     return {
@@ -360,6 +383,9 @@ export function createBridge(d: BridgeDeps): Bridge {
       sendCard: async (card, uuid) => void (await t.replyCard(replyTo, card, uuid)),
       notify: (text) =>
         (cardMode ? t.replyCard(replyTo, card({ status: "failed", markdown: text })).then(() => undefined) : t.replyText(replyTo, text)).catch(() => undefined),
+      get notifyOnFail() {
+        return notifyOnFail();
+      },
     };
   };
 
@@ -385,6 +411,8 @@ export function createBridge(d: BridgeDeps): Bridge {
     if (existing) return existing;
     if (d.routes.get(id)?.cardMessageId) return Promise.resolve();
     const uuid = partUuid(id, "ack");
+    // 卡片点击的 id 是合成的 card_<hash>，真正的回复目标在路由里
+    const replyTo = d.routes.get(id)?.replyTo ?? id;
     const receivedAt = d.routes.get(id)?.ts ?? now();
     const c = card({ status: "running", markdown: ACK_TEXT, footer: [`收到于 ${fmtClock(receivedAt)}`] });
     const p = (async () => {
@@ -393,21 +421,23 @@ export function createBridge(d: BridgeDeps): Bridge {
         try {
           cardId = await tk.createCardEntity!(c);
         } catch (e) {
-          if (isPermanentFeishuError(e)) disableCardkit(e);
+          // 只有 CardKit 权限类错误才全局关掉打字机；其他错误只影响这一条（退回普通卡片）
+          if (isCardkitPermissionError(e)) disableCardkit(e);
           else log("daemon.cardkit_create_failed", { msgid: id, error: errText(e) });
         }
         if (cardId) {
           try {
-            const mid = await tk.replyCardEntity!(id, cardId, uuid);
+            const mid = await tk.replyCardEntity!(replyTo, cardId, uuid);
+            usedSeq.delete(id);
             if (typeof mid === "string" && mid) await setRoute(id, { cardMessageId: mid, cardFinal: false, cardId, cardSeq: 0, cardStreaming: false });
             return;
           } catch (e) {
             if (!isPermanentFeishuError(e)) throw e;
-            disableCardkit(e);
+            log("daemon.cardkit_reply_failed", { msgid: id, error: errText(e) }); // 这一条退回普通卡片
           }
         }
       }
-      const mid = await d.transport.replyCard(id, c, uuid);
+      const mid = await d.transport.replyCard(replyTo, c, uuid);
       if (typeof mid === "string" && mid) await setRoute(id, { cardMessageId: mid, cardFinal: false });
     })()
       .catch((e) => log("daemon.ack_failed", { msgid: id, error: errText(e) }))
@@ -455,12 +485,18 @@ export function createBridge(d: BridgeDeps): Bridge {
         const shown = streamDisplayText(text);
         if (prev && prev.text === shown.text) continue;
         if (prev && now() - prev.at < (r.cardId ? 900 : 1400)) continue;
-        streamSeen.set(id, { text: shown.text, at: now(), truncated: shown.truncated });
         clearAck(id);
         waiting.delete(id); // 已经在输出了，不用再提醒"仍在处理"
         if (!d.routes.get(id)?.cardMessageId) await startAckCard(id);
         await ackPending.get(id)?.catch(() => undefined);
-        await withCardLock(id, () => pushStreamLocked(id, shown.text)).catch((e) => log("daemon.stream_failed", { msgid: id, error: errText(e) }));
+        // 推成功才记成"已显示"：失败的（含截断的最后一版）下一轮照样重推
+        await withCardLock(id, () => pushStreamLocked(id, shown.text))
+          .then(() => void streamSeen.set(id, { text: shown.text, at: now(), truncated: shown.truncated }))
+          .catch((e) => {
+            // 记下时间做节流，但不记文本：下一轮还会重推
+            streamSeen.set(id, { text: "", at: now(), truncated: false });
+            log("daemon.stream_failed", { msgid: id, error: errText(e) });
+          });
       }
     } finally {
       pumping = false;

@@ -5,11 +5,13 @@
 # worker 读 .claimed，处理完删除；worker 崩溃时，超过认领有效期会重新认领。
 #
 # 上下文（只由本脚本写，worker 从不直接改历史文件，避免两边同时写互相覆盖）：
-#   ~/hooks/state/<NAME>-ctx-<key>.json     {chatId, summary, turns:[{seq,user,assistant,ts}], next_seq, updated}
+#   ~/hooks/state/<NAME>-ctx-<key>.json     {chatId, summary, turns:[{seq,user,assistant,ts}], next_seq, clear_floor, updated}
 #   ~/hooks/state/<NAME>-pending.json       已认领、还没收割的消息 {messageId: {chatId, text, ts, at, skip}}
 # worker 只会留下两种"请求文件"，由本脚本下一轮合并：
 #   <NAME>-ctx-<key>.summary.json  {summary, upto_seq}  把 seq ≤ upto_seq 的旧轮压缩进 summary
 #   <NAME>-ctx-<key>.clear.json    {messageId}           用户要换话题：归档历史、这条不入新历史
+# /clear 后新历史的 seq 接着旧的往下编（不从 1 重来），并记 clear_floor = 清空时的 next_seq：
+#   清空前就在跑的 worker 迟到的 summary（upto_seq < clear_floor）直接丢弃，不会删掉新话题的轮次、也不会带回旧摘要
 # 流程：
 #   - 认领时：从 .claimed 读出 chatId 和用户原文记入 pending；/clear 在这一步直接归档
 #   - 收割时：先处理 clear / summary 请求，再看 pending 里哪些消息的回复已归档到 sent/<id>.json
@@ -29,7 +31,10 @@ NAME="feishu"                                   # 状态文件前缀
 BRIDGE_ROOT="$HOME/workspace/muse-feishu-bridge" # 桥接部署目录：装在别处就改这一行
 INBOX="$BRIDGE_ROOT/inbox"
 CTX_DIR="$HOME/hooks/state"
-STALE_SECS=1500        # 认领有效期：必须大于回复超时（config.json replyTimeoutMin=20 分钟）
+# 认领有效期：必须大于回复超时（config.json 的 replyTimeoutMin，默认 20 分钟），按它加 5 分钟算
+REPLY_TIMEOUT_MIN="$(jq -r '(.replyTimeoutMin // 20) | if type == "number" and . > 0 then ceil else 20 end' "$BRIDGE_ROOT/config.json" 2>/dev/null || echo 20)"
+case "$REPLY_TIMEOUT_MIN" in ''|*[!0-9]*) REPLY_TIMEOUT_MIN=20 ;; esac
+STALE_SECS=$((REPLY_TIMEOUT_MIN * 60 + 300))
 MAX_BYTES="${CTX_MAX_BYTES:-524288}"  # 每个会话的上下文上限：512KB（UTF-8 字节，含摘要），超了让 worker 压缩
                                       # Muse Spark 1.3 窗口 1,048,576 token；512KB 中文约 17 万字
 CTX_TTL_DAYS=7         # 多少天没动过的历史删掉
@@ -131,13 +136,23 @@ def blen(s):
 def size(ctx):  # UTF-8 字节
     return blen(ctx["summary"]) + sum(blen(t.get("user")) + blen(t.get("assistant")) for t in ctx["turns"])
 
-def do_clear(pending, chat, mid):
-    """归档该会话历史；这条以及同会话更早的未完成消息都不进新历史。"""
-    key = key_of(chat)
+def reset_ctx(key, chat=None):
+    """归档该会话历史，换成空历史：seq 接着编，clear_floor 挡住清空前发出的压缩请求。"""
     p = ctx_path(key)
-    if os.path.exists(p):
+    old = load_ctx(key) if os.path.exists(p) else None
+    if old is not None:
         os.replace(p, ctx_path(key, "-archived-%d" % int(time.time())))
     rm(ctx_path(key, ".summary"))
+    floor = old["next_seq"] if old is not None else 1
+    fresh = {"chatId": chat or (old or {}).get("chatId") or "", "summary": "", "turns": [],
+             "next_seq": floor, "clear_floor": floor, "updated": int(time.time())}
+    if old is not None and old.get("stop_seen"):
+        fresh["stop_seen"] = old["stop_seen"]
+    save_atomic(p, fresh)
+
+def do_clear(pending, chat, mid):
+    """归档该会话历史；这条以及同会话更早的未完成消息都不进新历史。"""
+    reset_ctx(key_of(chat), chat)
     at = pending.get(mid, {}).get("at", "")
     for k, v in pending.items():
         if v.get("chatId") == chat and (k == mid or (at and v.get("at", "") <= at)):
@@ -176,7 +191,7 @@ if mode == "harvest":
         if chat and key_of(chat) == key:
             do_clear(pending, chat, mid)
         elif os.path.exists(ctx_path(key)):
-            os.replace(ctx_path(key), ctx_path(key, "-archived-%d" % int(time.time())))
+            reset_ctx(key)
         rm(p)
         changed = True
     # 2) worker 留下的压缩结果
@@ -193,6 +208,8 @@ if mode == "harvest":
         if not isinstance(summary, str) or not isinstance(upto, int):
             continue
         ctx = load_ctx(key)
+        if upto < int(ctx.get("clear_floor") or 0):
+            continue  # /clear 之前发出的压缩请求，针对的是已归档的旧话题
         ctx["turns"] = [t for t in ctx["turns"] if t["seq"] > upto]
         ctx["summary"] = summary.strip()[:SUMMARY_MAX]
         ctx["updated"] = int(time.time())
@@ -248,6 +265,9 @@ if mode == "harvest":
 
 elif mode == "record":
     inbox = os.path.join(bridge, "inbox")
+    # 先全部记入 pending，再按消息时间（不是认领顺序）处理 /stop、/clear：
+    # 同一轮认领到"较早的消息 + 之后的 /clear"时，较早那条也要被 /clear 跳过
+    new = []
     for mid in args:
         if not mid or mid in pending:
             continue
@@ -256,6 +276,8 @@ elif mode == "record":
             continue
         chat = str(d.get("chatId") or "unknown")
         pending[mid] = {"chatId": chat, "text": user_text(d), "ts": int(time.time()), "at": str(d.get("ts", ""))}
+        new.append((mid, chat, d))
+    for mid, chat, d in sorted(new, key=lambda x: (pending[x[0]]["at"], x[0])):
         # /stop 之后的第一条：标 after_stop（同一次 /stop 只标一次，记在历史文件的 stop_seen）
         st = stop_info(chat)
         st_at = str(st.get("at") or "")
@@ -339,7 +361,8 @@ if [ -d "$INBOX" ]; then
       id="$(basename "$f" .json.claimed)"
       already=0
       for c in "${claimed[@]}"; do [ "$c" = "$id" ] && already=1 && break; done
-      if [ "$already" -eq 0 ] && touch "$f" 2>/dev/null; then
+      # touch -c：文件刚被 /stop 移走时不会凭空建一个空的 .claimed；空文件也不算
+      if [ "$already" -eq 0 ] && touch -c "$f" 2>/dev/null && [ -s "$f" ]; then
         claimed+=("$id")   # touch 重置认领时间，免得下一轮又被当成过期
       fi
     fi
