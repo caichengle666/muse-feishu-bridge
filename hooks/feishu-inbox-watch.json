@@ -10,5 +10,7 @@
     "surface": "side_chat",
     "to": "YOUR_SIDE_CHAT_ID"
   },
-  "presentation_locale": "zh-CN"
+  "presentation_locale": "zh-CN",
+  "created_at_ms": 1791691296000,
+  "updated_at_ms": 1791724800000
 }
