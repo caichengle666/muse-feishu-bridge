@@ -13,7 +13,7 @@
 ## 运行要求
 
 - Node.js 18+
-- 飞书开放平台创建**企业自建应用**，开启机器人能力，事件订阅选"使用长连接接收事件"，订阅 `im.message.receive_v1`；回调配置同样选长连接，订阅 `card.action.trigger`（/stop、恢复会话等卡片按钮要用，不订阅点按钮会报 200672）
+- 飞书开放平台创建**企业自建应用**，开启机器人能力，事件订阅选"使用长连接接收事件"，订阅 `im.message.receive_v1`；回调配置同样选长连接，订阅 `card.action.trigger`（/ids 登记协作机器人等卡片按钮要用，不订阅点按钮会报 200672）
 - 开通权限（建议一次性全开，后面再加要重新发布应用版本）：`im:message`、`im:message.p2p_msg:readonly`（收单聊消息）、`im:message:send_as_bot`、`im:message.group_at_msg:readonly`、`im:resource`（上传/下载图片和文件）、`im:message:update`（更新应用发送的消息，卡片原地更新）、`im:message.reactions:write_only`（收到消息先回表情）、`im:message.group_at_msg.include_bot:readonly`（机器人互动——收其他机器人 @ 你的消息）、`im:chat:readonly`（获取群组信息，免审）、`cardkit:card:write`（流式打字机卡片）；可选：`im:chat`、`im:chat:read`、`im:chat.members:read`（当前代码未用到，留给以后的群管理功能）。完整清单可用下方 JSON 在"权限管理 → 批量导入"一次开通
 - `config.json` 的 `allowedOpenIds` 白名单 fail-closed（为空拒绝启动）
 
@@ -156,6 +156,21 @@ inbox 里的消息不会自己处理——部署完 daemon 后必须创建一个
 - /ids 卡片登记按 open_id 优先匹配（配置里的称呼和飞书显示名不同也不会重复登记）；回复 @ 了主人和发送者以外的人时发纯文本（对方可能是没登记的机器人，卡片 @ 叫不动它）
 - 交活给别的机器人：`ats` 里写它的名字即可；到 `botMaxHops`（默认 3）手后不能再 @ 机器人，直接回复结果
 - 机器人交来的活做完后，如果不需要对方继续，就**不要**再 @ 它（否则会来回接力）
+
+## 断线补拉（0.5.0+）
+
+daemon 重启或长连接重连后，自动把断线期间的消息拉回来补处理，worker 不用做任何事，这些消息照常出现在 inbox 里（只是来得晚一些）：
+
+- 范围：最近 7 天活跃过的会话（最多 20 个，记在 `chats.json`），最多往回 `backfillMinutes` 分钟（默认 30，设 0 关闭）
+- 已处理过的按 message_id 跳过（`seen.json`），不会重复回复
+- 单聊用已有的 `im:message` 权限即可；群聊还要开通 `im:message.group_msg`（获取群组中所有消息，敏感权限，onboard 不会自动申请；用户要群聊补拉时再手动开通并发布版本）。没开就只补单聊，debug.log 里 `daemon.backfill` 记一条错误
+- 超过 `backfillMinutes` 的断线，更早的消息不补；用户问起时如实说明
+
+## 保活与自检
+
+- `keepalive.sh --install-cron`：cron 每 5 分钟检查、开机后拉起；`--uninstall-cron` 移除
+- hook 兜底：心跳停 90 秒直接调用 keepalive 拉起（不依赖 cron）；心跳停 10 分钟仍没救回、或 outbox 里的回复超过 3 分钟没发出，会唤醒 worker（payload 带 `health_issue`），worker 先跑 `bash keepalive.sh`、看 `daemon.log` 修复，再向用户报告；同一故障每小时最多提醒一次
+- `npm run doctor`：只读自检，有 FAIL 退出码 1
 
 ## 外部影响
 
