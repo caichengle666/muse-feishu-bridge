@@ -1,20 +1,23 @@
 {
   "name": "muse-feishu-bridge",
-  "version": "0.3.12",
+  "version": "0.4.0",
   "description": "Feishu/Lark long-connection bridge for the Muse platform (file-queue backend)",
   "type": "module",
   "scripts": {
     "build": "tsc",
     "start": "node dist/daemon.js",
     "check-config": "node dist/daemon.js --check-config",
-    "test": "tsc && node --test --test-concurrency=1 dist/test/*.test.js"
+    "test": "tsc && node --test --test-concurrency=1 dist/test/*.test.js",
+    "onboard": "node dist/onboard.js"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.73.0",
-    "https-proxy-agent": "^7.0.6"
+    "https-proxy-agent": "^7.0.6",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/qrcode": "^1.5.6",
     "@types/ws": "^8.18.2",
     "typescript": "^5.6.0"
   },

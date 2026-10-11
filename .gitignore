@@ -23,3 +23,4 @@ daemon.lock.stale.*
 .keepalive.lock
 .keepalive.lock.d/
 .DS_Store
+onboard-qr.png

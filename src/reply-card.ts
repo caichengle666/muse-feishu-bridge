@@ -34,7 +34,12 @@ export interface ReplyCardInput {
   atOpenId?: string;
   /** @ 目标：正文 "@名字" 换成 @ 标签，prefix 的在开头补 */
   ats?: AtTarget[];
+  /** 卡片实体的流式模式（CardKit 打字机效果） */
+  streaming?: boolean;
 }
+
+/** 正文 markdown 组件的 element_id（CardKit 流式更新按它定位） */
+export const CONTENT_ELEMENT_ID = "content";
 
 export function buildReplyCard(input: ReplyCardInput): Record<string, unknown> {
   const head = HEAD[input.status];
@@ -44,13 +49,18 @@ export function buildReplyCard(input: ReplyCardInput): Record<string, unknown> {
   const ats = [...(input.ats || []), ...(input.atOpenId ? [{ id: input.atOpenId, name: "主人" }] : [])];
   if (ats.length) md = applyAts(md, ats, "card");
   const footer = (input.footer || []).filter(Boolean).join(" · ");
-  const elements: Record<string, unknown>[] = [{ tag: "markdown", content: md }];
+  const elements: Record<string, unknown>[] = [{ tag: "markdown", element_id: CONTENT_ELEMENT_ID, content: md }];
   if (footer) {
     elements.push({ tag: "markdown", content: `<font color='grey'>${escapeFooter(footer)}</font>`, text_size: "notation" });
   }
+  const config: Record<string, unknown> = { update_multi: true, summary: { content: summaryOf(input.markdown) || title } };
+  if (input.streaming) {
+    config.streaming_mode = true;
+    config.streaming_config = { print_frequency_ms: { default: 50 }, print_step: { default: 2 }, print_strategy: "fast" };
+  }
   return {
     schema: "2.0",
-    config: { update_multi: true, summary: { content: summaryOf(input.markdown) || title } },
+    config,
     header: { title: { tag: "plain_text", content: title }, template: head.template },
     body: { elements },
   };

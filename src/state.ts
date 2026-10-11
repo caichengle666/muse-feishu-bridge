@@ -215,6 +215,12 @@ export interface Route {
   cardMessageId?: string;
   /** 状态卡已更新为最终结果（已完成 / 超时 / 失败） */
   cardFinal?: boolean;
+  /** 状态卡是 CardKit 卡片实体时的 card_id（之后用 CardKit 接口更新，支持流式打字机） */
+  cardId?: string;
+  /** 卡片实体最近一次使用的 sequence（每张卡严格递增） */
+  cardSeq?: number;
+  /** 状态卡正处于流式输出中 */
+  cardStreaming?: boolean;
   /** 入站消息里被 @ 的人/机器人（不含本机器人），出站 ats 的白名单与名字来源 */
   mentions?: { openId: string; name: string }[];
   /** 发送者是协作机器人时的称呼 */

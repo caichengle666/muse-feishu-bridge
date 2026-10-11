@@ -11,18 +11,19 @@
  *   巡检基于 inbox 文件里的时间戳，daemon 重启后依然生效（原版的计时器只在内存里）。
  */
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { FeishuCardAction, FeishuMessage } from "./types.js";
 import { MuseBackend, isSafeId, type InboxAttachment, type InboxItem } from "./muse-backend.js";
 import { OutboxDrainer, OutboxStore, partUuid, type Channel, type ReplyPayload } from "./outbox.js";
-import { CardEventDedupe, HeartbeatWriter, RouteStore, SeenStore } from "./state.js";
+import { CardEventDedupe, HeartbeatWriter, RouteStore, SeenStore, type Route } from "./state.js";
 import { makeIsAllowed, type BridgeConfig } from "./config.js";
 import { parseMessageInput } from "./messages.js";
 import { pruneOldFiles, errText, atomicWriteJson, SerialQueue } from "./fsutil.js";
 import { parseSlashCommand, runSlashCommand } from "./slash.js";
-import { buildReplyCard, fmtClock, fmtElapsed, type ReplyCardInput } from "./reply-card.js";
+import { buildReplyCard, fmtClock, fmtElapsed, CONTENT_ELEMENT_ID, type ReplyCardInput } from "./reply-card.js";
+import { parseStreamText, streamDisplayText } from "./stream.js";
 import { isPermanentFeishuError } from "./feishu-retry.js";
 import { extractMentions, findPeer, type PeerBot, mentionsOpenId, parseHop, resolveAts, type AtTarget } from "./mentions.js";
 import { resolveAllowedRoots } from "./files.js";
@@ -39,6 +40,12 @@ export interface BridgeTransport {
   downloadMessageResource(messageId: string, fileKey: string, type: "image" | "file", maxBytes?: number): Promise<{ bytes: Buffer; mimeType?: string }>;
   isRunning(): boolean;
   getBotOpenId(): string | undefined;
+  /** CardKit 卡片实体（可选；没有或没权限时回退到普通卡片 + PATCH） */
+  createCardEntity?(card: object): Promise<string>;
+  replyCardEntity?(messageId: string, cardId: string, uuid?: string): Promise<string | undefined>;
+  updateCardEntity?(cardId: string, card: object, sequence: number): Promise<void>;
+  streamCardText?(cardId: string, elementId: string, content: string, sequence: number): Promise<void>;
+  setCardStreaming?(cardId: string, on: boolean, sequence: number): Promise<void>;
 }
 
 export interface BridgeDeps {
@@ -58,6 +65,8 @@ export interface BridgeDeps {
   drainIntervalMs?: number;
   sweepIntervalMs?: number;
   heartbeatIntervalMs?: number;
+  /** 流式输出轮询间隔（默认 1000ms） */
+  streamIntervalMs?: number;
   pruneMaxAgeMs?: number;
   /** /status 显示的版本号 */
   version?: string;
@@ -106,6 +115,8 @@ export interface Bridge {
   onCardAction(action: FeishuCardAction): Promise<undefined>;
   drain(): ReturnType<OutboxDrainer["drain"]>;
   sweep(): Promise<void>;
+  /** 把 stream/ 里的流式输出推到状态卡一次（定时器每秒调用；测试直接调） */
+  pumpStreams(): Promise<void>;
   startTimers(): void;
   stopTimers(): void;
   /** 等待所有进行中的入站处理（测试用） */
@@ -187,7 +198,7 @@ export function createBridge(d: BridgeDeps): Bridge {
   /** 正在发送中的"处理中"卡（回复到达时先等它发完，拿到 message_id 再原地更新） */
   const ackPending = new Map<string, Promise<void>>();
 
-  const setRoute = async (id: string, patch: { cardMessageId?: string; cardFinal?: boolean }) => {
+  const setRoute = async (id: string, patch: Partial<Pick<Route, "cardMessageId" | "cardFinal" | "cardId" | "cardSeq" | "cardStreaming">>) => {
     const r = d.routes.get(id);
     if (r) await d.routes.set(id, { ...r, ...patch });
   };
@@ -197,16 +208,61 @@ export function createBridge(d: BridgeDeps): Bridge {
   };
   const card = (input: ReplyCardInput) => buildReplyCard({ ats: ownerAts, ...input });
 
+  // ---------------------------------------------------------------- CardKit 卡片实体 / 流式打字机
+  const tk = d.transport;
+  /** 没有 CardKit 能力或没权限（cardkit:card:write）时为 true：状态卡用普通卡片 + PATCH */
+  let cardkitOff = !(tk.createCardEntity && tk.replyCardEntity && tk.updateCardEntity);
+  const streamOff = d.config.streamReplies === false;
+  const disableCardkit = (e: unknown) => {
+    if (cardkitOff) return;
+    cardkitOff = true;
+    log("daemon.cardkit_disabled", { error: errText(e), hint: "开通 cardkit:card:write 权限并发布新版本后重启 daemon，即可启用打字机效果" });
+  };
+  /** 同一条消息的状态卡更新串行执行（流式推送、最终回复、/stop、超时不会互相覆盖或乱序） */
+  const cardLocks = new Map<string, Promise<unknown>>();
+  function withCardLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    const prev = cardLocks.get(id) ?? Promise.resolve();
+    const run = prev.catch(() => undefined).then(fn);
+    const tail = run.catch(() => undefined);
+    cardLocks.set(id, tail);
+    void tail.then(() => {
+      if (cardLocks.get(id) === tail) cardLocks.delete(id);
+    });
+    return run;
+  }
+  const nextSeq = async (id: string): Promise<number> => {
+    const seq = (d.routes.get(id)?.cardSeq ?? 0) + 1;
+    await setRoute(id, { cardSeq: seq });
+    return seq;
+  };
+  /** 更新状态卡（须在 withCardLock 内调用）：卡片实体走 CardKit（先关流式），否则 PATCH。 */
+  async function patchStatusCardLocked(id: string, c: object): Promise<void> {
+    const r = d.routes.get(id);
+    if (!r?.cardMessageId) return;
+    if (r.cardId && tk.updateCardEntity) {
+      if (r.cardStreaming && tk.setCardStreaming) {
+        await tk.setCardStreaming(r.cardId, false, await nextSeq(id)).catch((e) => log("daemon.stream_close_failed", { msgid: id, error: errText(e) }));
+        await setRoute(id, { cardStreaming: false });
+      }
+      await tk.updateCardEntity(r.cardId, c, await nextSeq(id));
+      return;
+    }
+    await tk.updateCard(r.cardMessageId, c);
+  }
+
   /**
    * 卡片模式下展示一张状态卡：有"处理中"卡就原地更新它，否则（或更新永久失败）新回复一张。
    * final=false 的卡（如"仍在处理"）新发出时会记成状态卡，之后的最终回复继续原地更新它。
    */
   async function showCard(id: string, replyTo: string, c: object, uuid: string, final: boolean): Promise<void> {
     await ackPending.get(id)?.catch(() => undefined);
+    return withCardLock(id, () => showCardLocked(id, replyTo, c, uuid, final));
+  }
+  async function showCardLocked(id: string, replyTo: string, c: object, uuid: string, final: boolean): Promise<void> {
     const r = d.routes.get(id);
     if (r?.cardMessageId && !r.cardFinal) {
       try {
-        await d.transport.updateCard(r.cardMessageId, c);
+        await patchStatusCardLocked(id, c);
         if (final) await setRoute(id, { cardFinal: true });
         return;
       } catch (e) {
@@ -319,6 +375,121 @@ export function createBridge(d: BridgeDeps): Bridge {
     if (t) clearTimeout(t);
     ackTimers.delete(id);
   };
+
+  /**
+   * 发"处理中"状态卡（卡片模式）。有 CardKit 能力时发卡片实体（之后可流式打字机），否则普通卡片。
+   * 同一条消息只发一次；回复/流式到达时先等它发完，拿到 message_id 再原地更新。
+   */
+  function startAckCard(id: string): Promise<void> {
+    const existing = ackPending.get(id);
+    if (existing) return existing;
+    if (d.routes.get(id)?.cardMessageId) return Promise.resolve();
+    const uuid = partUuid(id, "ack");
+    const receivedAt = d.routes.get(id)?.ts ?? now();
+    const c = card({ status: "running", markdown: ACK_TEXT, footer: [`收到于 ${fmtClock(receivedAt)}`] });
+    const p = (async () => {
+      if (!cardkitOff) {
+        let cardId: string | null = null;
+        try {
+          cardId = await tk.createCardEntity!(c);
+        } catch (e) {
+          if (isPermanentFeishuError(e)) disableCardkit(e);
+          else log("daemon.cardkit_create_failed", { msgid: id, error: errText(e) });
+        }
+        if (cardId) {
+          try {
+            const mid = await tk.replyCardEntity!(id, cardId, uuid);
+            if (typeof mid === "string" && mid) await setRoute(id, { cardMessageId: mid, cardFinal: false, cardId, cardSeq: 0, cardStreaming: false });
+            return;
+          } catch (e) {
+            if (!isPermanentFeishuError(e)) throw e;
+            disableCardkit(e);
+          }
+        }
+      }
+      const mid = await d.transport.replyCard(id, c, uuid);
+      if (typeof mid === "string" && mid) await setRoute(id, { cardMessageId: mid, cardFinal: false });
+    })()
+      .catch((e) => log("daemon.ack_failed", { msgid: id, error: errText(e) }))
+      .finally(() => ackPending.delete(id));
+    ackPending.set(id, p);
+    return p;
+  }
+
+  /** 流式：每条消息上次推到卡片的文本与时间 */
+  const streamSeen = new Map<string, { text: string; at: number; truncated: boolean }>();
+  const streamFile = (id: string) => join(d.paths.stream, `${id}.jsonl`);
+  const dropStream = async (id: string) => {
+    streamSeen.delete(id);
+    await rm(streamFile(id), { force: true }).catch(() => undefined);
+  };
+  let pumping = false;
+  /** 把 stream/<id>.jsonl 里 worker 已写出的内容推到状态卡（卡片模式）。 */
+  async function pumpStreams(): Promise<void> {
+    if (!cardMode || streamOff || pumping) return;
+    pumping = true;
+    try {
+      let names: string[];
+      try {
+        names = await readdir(d.paths.stream);
+      } catch {
+        return;
+      }
+      for (const name of names) {
+        if (!name.endsWith(".jsonl")) continue;
+        const id = name.slice(0, -".jsonl".length);
+        if (!isSafeId(id)) continue;
+        const r = d.routes.get(id);
+        const loc = d.outbox.locate(id);
+        if (!r || r.cardFinal || loc === "sent" || loc === "failed" || loc === "expired" || d.outbox.hasTombstone(id)) {
+          await dropStream(id);
+          continue;
+        }
+        if (loc !== "none" || d.outbox.runs.has(id)) continue; // 最终回复正在投递
+        const raw = await readFile(streamFile(id), "utf8").catch(() => null);
+        if (raw == null) continue;
+        const { text } = parseStreamText(raw);
+        if (!text.trim()) continue;
+        const prev = streamSeen.get(id);
+        if (prev?.truncated) continue;
+        const shown = streamDisplayText(text);
+        if (prev && prev.text === shown.text) continue;
+        if (prev && now() - prev.at < (r.cardId ? 900 : 1400)) continue;
+        streamSeen.set(id, { text: shown.text, at: now(), truncated: shown.truncated });
+        clearAck(id);
+        waiting.delete(id); // 已经在输出了，不用再提醒"仍在处理"
+        if (!d.routes.get(id)?.cardMessageId) await startAckCard(id);
+        await ackPending.get(id)?.catch(() => undefined);
+        await withCardLock(id, () => pushStreamLocked(id, shown.text)).catch((e) => log("daemon.stream_failed", { msgid: id, error: errText(e) }));
+      }
+    } finally {
+      pumping = false;
+    }
+  }
+  async function pushStreamLocked(id: string, text: string): Promise<void> {
+    const r = d.routes.get(id);
+    if (!r?.cardMessageId || r.cardFinal) return;
+    if (d.outbox.locate(id) !== "none" || d.outbox.runs.has(id)) return; // 最终回复到了，交给它
+    const useKit = Boolean(r.cardId && tk.updateCardEntity && tk.streamCardText);
+    const c = card({ status: "running", title: "✍️ 正在输出", markdown: text, footer: elapsedFooter(id), streaming: useKit });
+    if (useKit) {
+      const md = String(((c as { body?: { elements?: { content?: string }[] } }).body?.elements?.[0]?.content) ?? text);
+      if (!r.cardStreaming) {
+        await tk.updateCardEntity!(r.cardId!, c, await nextSeq(id));
+        await setRoute(id, { cardStreaming: true });
+        return;
+      }
+      try {
+        await tk.streamCardText!(r.cardId!, CONTENT_ELEMENT_ID, md, await nextSeq(id));
+      } catch (e) {
+        if (!isPermanentFeishuError(e)) throw e;
+        log("daemon.stream_text_failed", { msgid: id, error: errText(e) });
+        await tk.updateCardEntity!(r.cardId!, c, await nextSeq(id));
+      }
+      return;
+    }
+    await tk.updateCard(r.cardMessageId, c);
+  }
 
   async function downloadAttachments(msg: FeishuMessage, atts: { kind: "image" | "file" | "audio"; fileKey: string; fileName?: string }[]): Promise<InboxAttachment[]> {
     const out: InboxAttachment[] = [];
@@ -508,19 +679,11 @@ export function createBridge(d: BridgeDeps): Bridge {
       const t = setTimeout(() => {
         ackTimers.delete(id);
         if (delivered(id)) return;
-        const uuid = partUuid(id, "ack");
         if (!cardMode) {
-          void d.transport.replyText(id, ACK_TEXT, { uuid }).catch((e) => log("daemon.ack_failed", { msgid: id, error: errText(e) }));
+          void d.transport.replyText(id, ACK_TEXT, { uuid: partUuid(id, "ack") }).catch((e) => log("daemon.ack_failed", { msgid: id, error: errText(e) }));
           return;
         }
-        const receivedAt = d.routes.get(id)?.ts ?? now();
-        const p = (async () => {
-          const mid = await d.transport.replyCard(id, card({ status: "running", markdown: ACK_TEXT, footer: [`收到于 ${fmtClock(receivedAt)}`] }), uuid);
-          if (typeof mid === "string" && mid) await setRoute(id, { cardMessageId: mid, cardFinal: false });
-        })()
-          .catch((e) => log("daemon.ack_failed", { msgid: id, error: errText(e) }))
-          .finally(() => ackPending.delete(id));
-        ackPending.set(id, p);
+        void startAckCard(id);
       }, ackDelayMs);
       t.unref?.();
       ackTimers.set(id, t);
@@ -550,11 +713,14 @@ export function createBridge(d: BridgeDeps): Bridge {
       cancelled.push(mid);
       await ackPending.get(mid)?.catch(() => undefined);
       const r2 = d.routes.get(mid);
+      await dropStream(mid);
       if (cardMode && r2?.cardMessageId && !r2.cardFinal) {
-        await d.transport
-          .updateCard(r2.cardMessageId, card({ status: "stopped", markdown: STOPPED_CARD_TEXT, footer: elapsedFooter(mid) }))
-          .catch((e) => log("daemon.stop_card_failed", { msgid: mid, error: errText(e) }));
-        await setRoute(mid, { cardFinal: true });
+        await withCardLock(mid, async () => {
+          await patchStatusCardLocked(mid, card({ status: "stopped", markdown: STOPPED_CARD_TEXT, footer: elapsedFooter(mid) })).catch((e) =>
+            log("daemon.stop_card_failed", { msgid: mid, error: errText(e) }),
+          );
+          await setRoute(mid, { cardFinal: true });
+        });
       }
     }
     try {
@@ -711,12 +877,16 @@ export function createBridge(d: BridgeDeps): Bridge {
           ? { status: "done", markdown: "结果已发送。", footer: elapsedFooter(id) }
           : { status: "failed", markdown: "回复没能完整发出，已记录到 failed/，可以让助手重发。", footer: elapsedFooter(id) },
       );
-      try {
-        await d.transport.updateCard(r.cardMessageId, c);
-      } catch (e) {
-        log("daemon.card_finalize_failed", { msgid: id, error: errText(e) });
-      }
-      await setRoute(id, { cardFinal: true });
+      await withCardLock(id, async () => {
+        const r2 = d.routes.get(id);
+        if (!r2?.cardMessageId || r2.cardFinal) return;
+        try {
+          await patchStatusCardLocked(id, c);
+        } catch (e) {
+          log("daemon.card_finalize_failed", { msgid: id, error: errText(e) });
+        }
+        await setRoute(id, { cardFinal: true });
+      });
     }
   }
 
@@ -725,6 +895,7 @@ export function createBridge(d: BridgeDeps): Bridge {
     for (const id of [...r.sent, ...r.failed, ...r.expired]) {
       clearAck(id);
       waiting.delete(id);
+      await dropStream(id);
     }
     if (cardMode) await finalizeCards(r.sent, r.failed);
     return r;
@@ -758,6 +929,7 @@ export function createBridge(d: BridgeDeps): Bridge {
         }),
       ),
     drain: () => drainOnce(),
+    pumpStreams: () => pumpStreams(),
     sweep: safeSweep,
     startTimers() {
       const di = setInterval(() => {
@@ -769,7 +941,10 @@ export function createBridge(d: BridgeDeps): Bridge {
         if (!hb) return;
         void hb.setConnected(d.transport.isRunning()).then(() => hb.tick());
       }, d.heartbeatIntervalMs ?? 20_000);
-      timers.push(di, si, hi);
+      const pi = setInterval(() => {
+        void pumpStreams().catch((e) => log("daemon.stream_error", { error: errText(e) }));
+      }, d.streamIntervalMs ?? 1000);
+      timers.push(di, si, hi, pi);
       void safeSweep();
       if (d.heartbeat) void d.heartbeat.setConnected(d.transport.isRunning());
     },

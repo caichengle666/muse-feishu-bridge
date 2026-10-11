@@ -25,6 +25,8 @@ export interface Paths {
   expired: string;
   /** /stop 标记：stop/<会话>.json，worker 每步动手前查 */
   stop: string;
+  /** 流式输出：stream/<messageId>.jsonl，worker 边写边追加，daemon 推到卡片 */
+  stream: string;
   incoming: string;
   outgoing: string;
 }
@@ -56,6 +58,7 @@ export function makePaths(root: string): Paths {
     failed: join(r, "failed"),
     expired: join(r, "expired"),
     stop: join(r, "stop"),
+    stream: join(r, "stream"),
     incoming: join(r, "incoming"),
     outgoing: join(r, "outgoing"),
   };

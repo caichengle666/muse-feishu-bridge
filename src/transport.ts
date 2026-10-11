@@ -479,6 +479,57 @@ export class FeishuTransport {
     return res?.data?.message_id as string | undefined;
   }
 
+  // ---------------------------------------------------------------- CardKit（卡片实体，流式打字机）
+  // 需要权限 cardkit:card:write。没有该权限时调用方回退到普通卡片 + PATCH。
+
+  /** 创建卡片实体，返回 card_id。 */
+  async createCardEntity(card: object): Promise<string> {
+    debugLog("feishu.cardkit.create", {});
+    const res: any = await withFeishuRetry(() => this.sdkClient!.cardkit.v1.card.create({
+      data: { type: "card_json", data: JSON.stringify(card) },
+    }), "create card entity");
+    const id = res?.data?.card_id;
+    if (typeof id !== "string" || !id) throw new Error("cardkit.card.create 没有返回 card_id");
+    return id;
+  }
+
+  /** 以回复的形式发出一张卡片实体，返回 message_id。 */
+  async replyCardEntity(messageId: string, cardId: string, uuid?: string) {
+    debugLog("feishu.reply.card_entity", { messageId, cardId });
+    const res: any = await withFeishuRetry(() => this.sdkClient!.im.message.reply({
+      path: { message_id: messageId },
+      data: { msg_type: "interactive", content: JSON.stringify({ type: "card", data: { card_id: cardId } }), ...uuidField(uuid, 0) },
+    }), "reply card entity");
+    return res?.data?.message_id as string | undefined;
+  }
+
+  /** 全量更新卡片实体（sequence 每张卡严格递增）。 */
+  async updateCardEntity(cardId: string, card: object, sequence: number) {
+    debugLog("feishu.cardkit.update", { cardId, sequence });
+    await withFeishuRetry(() => this.sdkClient!.cardkit.v1.card.update({
+      path: { card_id: cardId },
+      data: { card: { type: "card_json", data: JSON.stringify(card) }, sequence, uuid: `u_${cardId}_${sequence}` },
+    } as any), "update card entity");
+  }
+
+  /** 流式更新卡片里一个 markdown 组件的全文：新文本以旧文本开头时，新增部分以打字机效果输出。 */
+  async streamCardText(cardId: string, elementId: string, content: string, sequence: number) {
+    await withFeishuRetry(() => this.sdkClient!.cardkit.v1.cardElement.content({
+      path: { card_id: cardId, element_id: elementId },
+      data: { content, sequence, uuid: `c_${cardId}_${sequence}` },
+    }), "stream card text");
+  }
+
+  /** 打开 / 关闭卡片实体的流式模式。 */
+  async setCardStreaming(cardId: string, on: boolean, sequence: number) {
+    const config: Record<string, unknown> = { streaming_mode: on };
+    if (on) config.streaming_config = { print_frequency_ms: { default: 50 }, print_step: { default: 2 }, print_strategy: "fast" };
+    await withFeishuRetry(() => this.sdkClient!.cardkit.v1.card.settings({
+      path: { card_id: cardId },
+      data: { settings: JSON.stringify({ config }), sequence, uuid: `s_${cardId}_${sequence}` },
+    }), "card streaming settings");
+  }
+
   async updateCard(messageId: string, card: object) {
     debugLog("feishu.update.card", { messageId });
     await withFeishuRetry(() => this.sdkClient!.im.v1.message.patch({

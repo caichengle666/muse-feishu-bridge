@@ -14,7 +14,7 @@
 
 - Node.js 18+
 - 飞书开放平台创建**企业自建应用**，开启机器人能力，事件订阅选"使用长连接接收事件"，订阅 `im.message.receive_v1`；回调配置同样选长连接，订阅 `card.action.trigger`（/stop、恢复会话等卡片按钮要用，不订阅点按钮会报 200672）
-- 开通权限（建议一次性全开，后面再加要重新发布应用版本）：`im:message`、`im:message.p2p_msg:readonly`（收单聊消息）、`im:message:send_as_bot`、`im:message.group_at_msg:readonly`、`im:resource`（上传/下载图片和文件）、`im:message:update`（更新应用发送的消息，卡片原地更新）、`im:message.reactions:write_only`（收到消息先回表情）、`im:message.group_at_msg.include_bot:readonly`（机器人互动——收其他机器人 @ 你的消息）、`im:chat:readonly`（获取群组信息，免审）；可选：`im:chat`、`im:chat:read`、`im:chat.members:read`（当前代码未用到，留给以后的群管理功能）。完整清单可用下方 JSON 在"权限管理 → 批量导入"一次开通
+- 开通权限（建议一次性全开，后面再加要重新发布应用版本）：`im:message`、`im:message.p2p_msg:readonly`（收单聊消息）、`im:message:send_as_bot`、`im:message.group_at_msg:readonly`、`im:resource`（上传/下载图片和文件）、`im:message:update`（更新应用发送的消息，卡片原地更新）、`im:message.reactions:write_only`（收到消息先回表情）、`im:message.group_at_msg.include_bot:readonly`（机器人互动——收其他机器人 @ 你的消息）、`im:chat:readonly`（获取群组信息，免审）、`cardkit:card:write`（流式打字机卡片）；可选：`im:chat`、`im:chat:read`、`im:chat.members:read`（当前代码未用到，留给以后的群管理功能）。完整清单可用下方 JSON 在"权限管理 → 批量导入"一次开通
 - `config.json` 的 `allowedOpenIds` 白名单 fail-closed（为空拒绝启动）
 
 权限批量导入 JSON（必需项；可选的 `im:chat`、`im:chat:read`、`im:chat.members:read` 需要时自己加）：
@@ -31,7 +31,8 @@
       "im:message:update",
       "im:message.reactions:write_only",
       "im:resource",
-      "im:chat:readonly"
+      "im:chat:readonly",
+      "cardkit:card:write"
     ],
     "user": []
   }
@@ -40,18 +41,35 @@
 
 开通或补开权限后，必须在"版本管理与发布"里发布新版本才生效。
 
-## 部署
+## 部署（推荐：扫码建应用，0.4.0+）
 
 ```bash
 git clone https://github.com/caichengle666/muse-feishu-bridge && cd muse-feishu-bridge
-npm ci
+npm ci && npm run build && npm test
+npm run onboard -- --name "<用户想要的机器人名称>"   # 后台运行，见下
+npm run check-config
+bash keepalive.sh --install-cron && bash keepalive.sh   # 常驻
+```
+
+`npm run onboard` 的做法（Muse 照做）：
+
+1. 先问用户机器人叫什么（建好后不能用扫码改名），作为 `--name` 传入；不问就默认「{用户名} 的 Muse」
+2. 后台运行 onboard（它会一直等扫码，最长 60 分钟），把输出写到日志；几秒后日志里会出现一条 `https://open.feishu.cn/page/launcher?...` 链接，同时生成 `onboard-qr.png`
+3. **把 `onboard-qr.png` 图片发给用户**（同时附上链接，手机上可直接点开），请用户用**手机飞书**扫码，在飞书的确认页核对名称和权限后点确认
+4. 用户确认后 onboard 自动退出并输出"成功"：App ID / Secret 已写入 `secrets.env`（600），扫码人的 open_id 已加入 `config.json` 白名单并设为主人，所需权限、长连接事件 `im.message.receive_v1`、卡片回调 `card.action.trigger` 都已开好，**不用进开发者后台、不用手动发布版本**
+5. 已有应用缺权限（如升级到 0.4.0 想用打字机效果）：`npm run onboard -- --update-permissions`，同样发二维码给用户扫一次
+6. 输出 access_denied = 用户点了拒绝；expired = 二维码过期，重新运行即可；扫码流程用不了就走下面的手动方式
+
+## 手动部署（扫码不可用时）
+
+```bash
 cp secrets.env.example secrets.env  # 填入 FEISHU_APP_ID / FEISHU_APP_SECRET，chmod 600
 cp config.example.json config.json  # 填 allowedOpenIds（飞书 open_id）
 npm run build && npm test
 node dist/daemon.js  # 或用 keepalive.sh + cron 常驻
 ```
 
-## 不会申请机器人？让 Muse 代办
+## 不会申请机器人？让 Muse 代办（手动方式）
 
 没操作过飞书开放平台不用自己研究——直接在 **Muse App 里开启浏览器操作模式**，跟 Muse 说：
 
@@ -61,7 +79,7 @@ Muse 会在浏览器里帮你走完：
 
 1. 创建企业自建应用并开启机器人能力
 2. 事件订阅选"使用长连接接收事件"，订阅 `im.message.receive_v1`；回调配置选长连接，订阅 `card.action.trigger`（卡片按钮）
-3. 开通所需权限（一次性全开，后面再加要重新发布版本）：`im:message`、`im:message.p2p_msg:readonly`（收单聊消息）、`im:message:send_as_bot`、`im:message.group_at_msg:readonly`、`im:resource`（上传/下载图片和文件）、`im:message:update`（更新应用发送的消息，卡片原地更新）、`im:message.reactions:write_only`（收到消息先回表情）、`im:message.group_at_msg.include_bot:readonly`（机器人互动——收其他机器人 @ 你的消息）、`im:chat:readonly`（获取群组信息，免审）；可选：`im:chat`、`im:chat:read`、`im:chat.members:read`（当前代码未用到，留给以后的群管理功能）。完整清单可用下方 JSON 在"权限管理 → 批量导入"一次开通
+3. 开通所需权限（一次性全开，后面再加要重新发布版本）：`im:message`、`im:message.p2p_msg:readonly`（收单聊消息）、`im:message:send_as_bot`、`im:message.group_at_msg:readonly`、`im:resource`（上传/下载图片和文件）、`im:message:update`（更新应用发送的消息，卡片原地更新）、`im:message.reactions:write_only`（收到消息先回表情）、`im:message.group_at_msg.include_bot:readonly`（机器人互动——收其他机器人 @ 你的消息）、`im:chat:readonly`（获取群组信息，免审）、`cardkit:card:write`（流式打字机卡片）；可选：`im:chat`、`im:chat:read`、`im:chat.members:read`（当前代码未用到，留给以后的群管理功能）。完整清单可用下方 JSON 在"权限管理 → 批量导入"一次开通
 4. 发布应用版本
 5. 取出 App ID 和 App Secret，帮你写好 `secrets.env`（密钥只存你本地，不会外传）
 
@@ -111,6 +129,16 @@ inbox 里的消息不会自己处理——部署完 daemon 后必须创建一个
 - inbox 里的 `attachments[].path` 是用户发来的图片/文件的本地路径
 - 卡片点击的 inbox id 是 `card_…`，照常用这个 id 写 outbox，daemon 会回复到被点的卡片
 - 发送失败看 `failed/<id>.reason.json`
+
+## 流式输出（打字机效果，0.4.0+）
+
+长回复可以边写边让用户看到：处理过程中往 `stream/<messageId>.jsonl` 追加，每行一个 JSON：`{"text":"这一段内容\n\n"}`。
+
+- 各行的 text 按原样首尾相接（不加分隔符，换行自己写进 text），用标准 JSON 序列化，一次追加一整行
+- daemon 每秒把累计内容推到这条消息的状态卡：有 `cardkit:card:write` 权限时是飞书原生打字机效果，没有时逐段刷新
+- **最后仍然必须写 `outbox/<id>.json`（完整正文）**，它到达后卡片变成最终回复、stream 文件自动删除；只写 stream 不写 outbox，用户收不到最终结果
+- 卡片上流式部分最多显示约 3000 字，更长的内容在 outbox 到达后分段完整发出
+- 只在卡片模式（默认）生效；`config.json` 设 `"streamReplies": false` 可关闭
 
 ## @ 别人 / 机器人之间接力
 

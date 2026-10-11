@@ -33,6 +33,11 @@ export interface BridgeConfig {
    */
   replyStyle?: "card" | "classic";
   /**
+   * 流式输出（卡片模式）：worker 往 stream/<messageId>.jsonl 边写边追加，daemon 每秒推到状态卡，默认 true。
+   * 开通 cardkit:card:write 时是飞书原生打字机效果，否则逐段刷新。
+   */
+  streamReplies?: boolean;
+  /**
    * 协作机器人（机器人 @ 机器人接力）。登记后：
    *   - 它们在群里 @ 本机器人的消息会被接收（需在飞书开放平台开通
    *     "获取群组中其他机器人和用户@当前机器人的消息"权限 im:message.group_at_msg.include_bot:readonly）；

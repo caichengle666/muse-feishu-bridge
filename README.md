@@ -1,4 +1,4 @@
-# muse-feishu-bridge 0.3.12
+# muse-feishu-bridge 0.4.0
 
 飞书 × Muse 桥接：在飞书里直接跟 Muse 聊天。企业自建应用 + WebSocket 长连接，不需要公网回调地址。
 
@@ -11,7 +11,7 @@ https://github.com/caichengle666/muse-feishu-bridge/blob/main/SKILL.md
 请按这个 skill 帮我部署飞书桥
 ```
 
-Muse 会照着 SKILL.md 自己走完：创建飞书企业自建应用、开权限、订阅事件、发布版本，写好密钥、装依赖、编译、注册 hook、跑起来。你只需要在登录、扫码这类环节接管一下浏览器，最后给机器人发一条消息让 Muse 从日志里拿到你的 open_id 填进白名单。
+Muse 会照着 SKILL.md 自己装依赖、编译，然后**发给你一个二维码**：用手机飞书扫一下，在飞书的确认页点确认，应用、权限、事件订阅、密钥、白名单一次全部搞定（0.4.0+，不用进开发者后台、不用发布版本）。之后 Muse 注册 hook、跑起来就能聊了。
 
 下面是给想自己动手或想了解原理的人看的。
 
@@ -28,6 +28,23 @@ Muse 会照着 SKILL.md 自己走完：创建飞书企业自建应用、开权�
 
 ## 快速开始
 
+### 扫码建应用（推荐，0.4.0+）
+
+```bash
+npm install && npm run build
+npm run onboard -- --name "我的 Muse"
+```
+
+终端会打印二维码（同时保存为 `onboard-qr.png`，并给出链接）。用手机飞书扫码，在确认页核对机器人名称和权限后点确认，脚本自动：
+
+- 把 App ID / App Secret 写进 `secrets.env`（600，不打印）
+- 把扫码人的 open_id 加进 `config.json` 的白名单并设为主人
+- 通过确认页一次开好下面全部权限、长连接事件 `im.message.receive_v1` 和卡片回调 `card.action.trigger`，确认即生效
+
+已有应用想补权限（比如升级后要用打字机效果）：`npm run onboard -- --update-permissions`，扫一次码即可。然后 `npm run check-config && node dist/daemon.js`。
+
+### 手动建应用
+
 1. 在[飞书开放平台](https://open.feishu.cn/)创建企业自建应用，开启机器人能力
 2. 事件订阅选择"使用长连接接收事件"，订阅 `im.message.receive_v1`；回调配置也选长连接，订阅 `card.action.trigger`（/stop、恢复会话等卡片按钮要用，不订阅点按钮会报 200672）
 3. 开通权限（"权限管理 → 批量导入"粘贴下面的 JSON 一次开齐）：
@@ -39,6 +56,7 @@ Muse 会照着 SKILL.md 自己走完：创建飞书企业自建应用、开权�
    - `im:message.reactions:write_only`：收到消息先回表情
    - `im:resource`：上传/下载图片和文件
    - `im:chat:readonly`：读取群信息
+   - `cardkit:card:write`：流式打字机卡片（没开也能用，只是逐段刷新、没有打字机动画）
 4. 发布应用版本，拿到 App ID / App Secret（以后补开权限也要重新发布版本才生效）
 
 ```json
@@ -53,7 +71,8 @@ Muse 会照着 SKILL.md 自己走完：创建飞书企业自建应用、开权�
       "im:message:update",
       "im:message.reactions:write_only",
       "im:resource",
-      "im:chat:readonly"
+      "im:chat:readonly",
+      "cardkit:card:write"
     ],
     "user": []
   }
@@ -66,7 +85,7 @@ cp secrets.env.example secrets.env && chmod 600 secrets.env   # 填 FEISHU_APP_I
 cp config.example.json config.json                             # 填 allowedOpenIds
 npm run build
 npm run check-config
-npm test                                                       # 29 项，离线（假 SDK），不连飞书
+npm test                                                       # 91 项，离线（假 SDK），不连飞书
 node dist/daemon.js
 ```
 
@@ -156,6 +175,16 @@ keepalive 用 pid + 进程启动时间 + 启动令牌核实身份，只会杀自
 飞书 SDK 的 REST 请求走 axios，会读取 `HTTPS_PROXY` 环境变量；但长连接用的 `ws` 库**不读**代理变量。
 0.2.0 起：检测到 `HTTPS_PROXY`（或 `HTTP_PROXY` / `ALL_PROXY`）时，REST 和长连接统一走同一个 CONNECT 隧道；遵守 `NO_PROXY`。
 `config.json` 里 `"proxy": "off"` 强制直连，填 `"http://host:port"` 则覆盖环境变量。`--check-config` 会显示实际出网方式。
+
+## 流式输出（打字机效果，0.4.0）
+
+长回复不用等写完才看到：助手处理中往 `stream/<messageId>.jsonl` 追加 `{"text":"一段内容\n\n"}`（每行一个 JSON，各段原样拼接），daemon 每秒把累计内容推到这条消息的状态卡上，标题变成「✍️ 正在输出」。
+
+- 开了 `cardkit:card:write`：状态卡是 CardKit 卡片实体，飞书原生打字机动画
+- 没开：自动回退成普通卡片 + PATCH，逐段刷新（日志里有一条 `daemon.cardkit_disabled` 提示）
+- 最终以 `outbox/<id>.json` 为准：它到达后卡片变成「✅ 已完成」的完整回复，stream 文件删除；`/stop`、超时同样会停止推送
+- 流式部分最多显示约 3000 字，更长的在最终回复时分段发出
+- `config.json` 的 `streamReplies: false` 关闭；`replyStyle: classic` 下不生效
 
 ## 卡片样式（replyStyle: card，默认）
 

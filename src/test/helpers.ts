@@ -49,7 +49,7 @@ export class FakeTransport implements BridgeTransport {
     };
   }
 
-  private async rec(method: string, target: string, arg: unknown, uuid?: string): Promise<void> {
+  protected async rec(method: string, target: string, arg: unknown, uuid?: string): Promise<void> {
     const c: Call = { method, target, arg, ...(uuid ? { uuid } : {}) };
     this.calls.push(c);
     const g = this.gates.get(method);

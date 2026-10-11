@@ -104,7 +104,7 @@ async function main(): Promise<void> {
     inflight: paths.inflight,
   });
   await outbox.init();
-  for (const dir of [paths.incoming, paths.outgoing]) await mkdir(dir, { recursive: true });
+  for (const dir of [paths.incoming, paths.outgoing, paths.stream]) await mkdir(dir, { recursive: true });
   const recovered = await outbox.recoverInflight();
   if (recovered.requeued.length || recovered.expired.length) log("daemon.inflight_recovered", recovered);
 
