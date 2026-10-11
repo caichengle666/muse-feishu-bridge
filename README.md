@@ -2,6 +2,19 @@
 
 飞书 × Muse 桥接：在飞书里直接跟 Muse 聊天。企业自建应用 + WebSocket 长连接，不需要公网回调地址。
 
+## 最快部署：把 SKILL.md 丢给 Muse
+
+不用读下面的文档。在 Muse App 里开启浏览器操作模式，把这个链接发给它：
+
+```
+https://github.com/caichengle666/muse-feishu-bridge/blob/main/SKILL.md
+请按这个 skill 帮我部署飞书桥
+```
+
+Muse 会照着 SKILL.md 自己走完：创建飞书企业自建应用、开权限、订阅事件、发布版本，写好密钥、装依赖、编译、注册 hook、跑起来。你只需要在登录、扫码这类环节接管一下浏览器，最后给机器人发一条消息让 Muse 从日志里拿到你的 open_id 填进白名单。
+
+下面是给想自己动手或想了解原理的人看的。
+
 ## 架构
 
 ```
