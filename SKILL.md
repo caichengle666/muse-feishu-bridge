@@ -68,6 +68,7 @@ inbox 里的消息不会自己处理——部署完 daemon 后必须创建一个
 - 只按大小限制（512KB，UTF-8 字节，含摘要），不按轮数。超限时给最新那条标 `compress_needed`，worker 回复完后把最旧的几轮压缩成摘要，写 `feishu-ctx-<ctx_key>.summary.json`：`{summary, upto_seq}`，脚本下一轮合并（删掉 seq ≤ upto_seq 的轮）
 - worker 一直没压缩、涨到 2 倍上限时，脚本兜底从最旧的开始丢
 - `/clear`（群里 `@机器人 /clear` 也行）：脚本认领时直接把历史归档（保留 30 天），这条和同会话更早没回完的都不进新历史；用户用自然语言说换话题时，worker 写 `feishu-ctx-<ctx_key>.clear.json`：`{messageId}`，效果相同
+- `/compact [重点]`（群里 `@机器人 /compact` 也行）：手动压缩，这条本身不进历史；上下文带 `compact: true`、`compact_hint`、`size_bytes`，并强制 `compress_needed: true`，worker 把 summary 和除最近 2 轮外的带 seq 的轮压成摘要，照常写 `feishu-ctx-<ctx_key>.summary.json`；还在处理中的任务（没 seq 的）不动，回复后照常入历史
 - `/stop`（`@机器人 /stop` 也行）：daemon 直接处理，中断本会话所有没回完的消息——inbox 文件移到 `expired/` 并留 `<id>.stopped`、写墓碑（迟到的回复不发）、写 `stop/<会话>.json`；worker 每步动手前检查自己的 `.claimed` 是否还在，不在就停；脚本收割时把被中断的那条记成"被中断"一轮，之后第一条新消息的上下文带 `after_stop: true`
 - 普通历史 7 天没动自动删；state 全部原子写入；轮询脚本加了 flock，同一时刻只跑一个
 - 私聊、每个群各自一份；群里的话题和群主聊天共用一份，群里多人说话时不区分是谁

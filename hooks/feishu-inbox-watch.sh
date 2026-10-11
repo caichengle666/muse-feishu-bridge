@@ -14,6 +14,8 @@
 #   - 认领时：从 .claimed 读出 chatId 和用户原文记入 pending；/clear 在这一步直接归档
 #   - 收割时：先处理 clear / summary 请求，再看 pending 里哪些消息的回复已归档到 sent/<id>.json
 #     （daemon 发送成功才归档，里面 text 就是用户实际看到的回复），追加成一轮
+#   - /compact [重点]：手动压缩。这条不进历史；上下文带 compact=true + compress_needed=true（不管多大），worker 把
+#     较早的轮压成摘要（保留最近 2 轮原文），照常写 summary 请求文件由本脚本合并；还在处理中的任务不受影响
 #   - /stop 由 daemon 秒级处理（不进 inbox）：被中断的消息移到 expired/ 并留 expired/<id>.stopped，
 #     收割时记成"被中断"的一轮；之后第一条新消息带 after_stop，提醒 worker 按新指令做、别接着做旧任务
 #   - 唤醒时：按 messageId 把 {summary, turns, compress_needed, ctx_key} 写进上下文文件，payload 的 context_file 指向它
@@ -58,15 +60,24 @@ ITEM_MAX = 8000           # 单条截断（字）
 SUMMARY_MAX = 6000        # 摘要上限（字，worker 写超了也截断）
 MENTION_RE = re.compile(r"^\s*(@[^@\n]*?（你）|@\S+)\s*")
 
-def is_clear(text):
-    """整条消息就是 /clear（前面可以带 @机器人）；句子里顺带提到 /clear 不算"""
+def strip_mentions(text):
     t = text or ""
     while True:
         t2 = MENTION_RE.sub("", t, count=1)
         if t2 == t:
-            break
+            return t.strip()
         t = t2
-    return t.strip().lower() == "/clear"
+
+def is_clear(text):
+    """整条消息就是 /clear（前面可以带 @机器人）；句子里顺带提到 /clear 不算"""
+    return strip_mentions(text).lower() == "/clear"
+
+COMPACT_RE = re.compile(r"^/compact(?:\s+([\s\S]*))?$", re.I)
+
+def compact_cmd(text):
+    """/compact [重点说明]（前面可以带 @机器人）：返回重点说明（可为空串）；不是这条命令返回 None"""
+    m = COMPACT_RE.match(strip_mentions(text))
+    return None if not m else (m.group(1) or "").strip()[:500]
 
 def key_of(chat):
     chat = chat or "unknown"
@@ -190,7 +201,7 @@ if mode == "harvest":
         if os.path.exists(os.path.join(bridge, "expired", mid + ".stopped")):
             # 用户 /stop 中断了这条：记成一轮，让后面的 worker 知道它没做完
             del pending[mid]; changed = True
-            if info.get("skip"):
+            if info.get("skip") or info.get("compact") is not None:
                 continue
             chat = info.get("chatId") or "unknown"
             key = key_of(chat)
@@ -212,7 +223,7 @@ if mode == "harvest":
         if not reply:      # 读失败（理论上 sent/ 是原子归档的），下轮再试
             continue
         del pending[mid]; changed = True
-        if info.get("skip"):
+        if info.get("skip") or info.get("compact") is not None:   # /compact 本身不进历史
             continue
         chat = info.get("chatId") or "unknown"
         key = key_of(chat)
@@ -255,6 +266,10 @@ elif mode == "record":
                 save_atomic(ctx_path(key), ctx)
         if is_clear(d.get("text")):
             do_clear(pending, chat, mid)
+        else:
+            c = compact_cmd(d.get("text"))
+            if c is not None:
+                pending[mid]["compact"] = c
     save_atomic(PENDING, pending)
 
 elif mode == "context":
@@ -269,8 +284,13 @@ elif mode == "context":
             out[mid] = {"ctx_key": key, "cleared": True, "summary": "", "turns": [], "compress_needed": False}
             continue
         ctx = load_ctx(key)
-        need = (size(ctx) > max_bytes and key not in flagged and len(ctx["turns"]) > 1
-                and not os.path.exists(ctx_path(key, ".summary")))
+        compact = me.get("compact")
+        if compact is not None:
+            # 用户手动 /compact：不管多大都压（最新一条负责；同一 wake 里别的消息不再重复压）
+            need = key not in flagged and (len(ctx["turns"]) > 0 or bool(ctx["summary"]))
+        else:
+            need = (size(ctx) > max_bytes and key not in flagged and len(ctx["turns"]) > 1
+                    and not os.path.exists(ctx_path(key, ".summary")))
         if need:
             flagged.add(key)
         turns = [{"seq": t["seq"], "user": t.get("user", ""), "assistant": t.get("assistant", "")} for t in ctx["turns"]]
@@ -282,6 +302,10 @@ elif mode == "context":
         out[mid] = {"ctx_key": key, "summary": ctx["summary"], "turns": turns, "compress_needed": need}
         if me.get("after_stop"):
             out[mid]["after_stop"] = True
+        if compact is not None:
+            out[mid]["compact"] = True
+            out[mid]["compact_hint"] = compact
+            out[mid]["size_bytes"] = size(ctx)
     p = os.path.join(ctx_dir, "%s-wake-%d-%d.json" % (name, int(time.time() * 1000), os.getpid()))
     save_atomic(p, out)
     print(p)
