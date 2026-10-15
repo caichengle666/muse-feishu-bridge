@@ -75,6 +75,8 @@ else
   fi
 fi
 if command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -qF "muse-feishu-bridge keepalive ($ROOT)"; then
+  crontab -l 2>/dev/null | grep -F "muse-feishu-bridge keepalive ($ROOT)" | grep -q "NODE_BIN=" ||
+    warn "cron 条目没写 node 路径（cron 的 PATH 里可能找不到 node）：重新运行 bash keepalive.sh --install-cron"
   if pgrep -x cron >/dev/null 2>&1 || pgrep -x crond >/dev/null 2>&1; then ok "cron 保活已安装且 cron 在运行"; else warn "cron 条目在但 cron 服务没运行（hook 会兜底拉起，但最好 service cron start）"; fi
 else
   warn "没装 cron 保活（bash keepalive.sh --install-cron）；hook 每 5 秒会兜底拉起"
@@ -91,15 +93,20 @@ done
 HOOK_SH="$HOME/hooks/scripts/$HOOK_ID.sh"
 HOOK_DEF="$HOME/hooks/definitions/$HOOK_ID.json"
 if [ -f "$HOOK_SH" ]; then
-  hook_root="$(sed -n 's/^BRIDGE_ROOT="\(.*\)".*/\1/p' "$HOOK_SH" | head -1)"
-  hook_root="${hook_root//\$HOME/$HOME}"
+  if grep -q '^resolve_bridge_root()' "$HOOK_SH"; then
+    # 新版 hook 自动定位桥接目录：用 hook 自己的函数算一遍（只定义函数，不跑轮询）
+    hook_root="$(bash -c 'eval "$(sed -n "/^DEFAULT_BRIDGE_ROOT=/,/^BRIDGE_ROOT=/p" "$1" | sed "\$d")"; resolve_bridge_root' _ "$HOOK_SH" 2>/dev/null)"
+  else
+    hook_root="$(sed -n 's/^BRIDGE_ROOT="\(.*\)".*/\1/p' "$HOOK_SH" | head -1)"
+    hook_root="${hook_root//\$HOME/$HOME}"
+  fi
   if [ -n "$hook_root" ] && [ "$(cd "$hook_root" 2>/dev/null && pwd)" != "$ROOT" ]; then
-    fail "hook 脚本的 BRIDGE_ROOT（$hook_root）不是本目录（$ROOT）：消息会没人处理，改脚本里那一行"
+    fail "hook 脚本的 BRIDGE_ROOT（$hook_root）不是本目录（$ROOT）：消息会没人处理（装了多份时设 MUSE_FEISHU_ROOT 或改脚本里的 DEFAULT_BRIDGE_ROOT）"
   else
     ok "hook 脚本存在：$HOOK_SH"
   fi
   if ! cmp -s "$HOOK_SH" hooks/$HOOK_ID.sh; then
-    warn "hook 脚本和仓库里的不一致（更新后没复制？）：cp hooks/$HOOK_ID.sh $HOOK_SH（装在别处的话记得改 BRIDGE_ROOT）"
+    warn "hook 脚本和仓库里的不一致（更新后没复制？）：cp hooks/$HOOK_ID.sh $HOOK_SH"
   fi
 else
   fail "hook 脚本不存在：$HOOK_SH（cp hooks/$HOOK_ID.sh 过去）"

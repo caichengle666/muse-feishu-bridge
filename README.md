@@ -160,7 +160,7 @@ outbox（助手写，**请先写临时文件再 rename**）：
 ```bash
 bash keepalive.sh            # 健康则静默退出；进程不在 / 心跳停滞 / 长时间断线则拉起
 bash keepalive.sh --status   # 只检查
-bash keepalive.sh --install-cron    # 一键装 cron：每 5 分钟检查 + 开机 30 秒后拉起（可重复执行）
+bash keepalive.sh --install-cron    # 一键装 cron：每 5 分钟检查 + 开机 30 秒后拉起（可重复执行；条目里写死 node 绝对路径，换 node 版本后重装）
 bash keepalive.sh --uninstall-cron
 ```
 

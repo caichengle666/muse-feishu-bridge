@@ -6,7 +6,7 @@
 # 用法：
 #   bash keepalive.sh            # 检查并在需要时拉起
 #   bash keepalive.sh --status   # 只检查：健康 exit 0，不健康 exit 1（不做任何动作）
-#   bash keepalive.sh --install-cron    # 装好 cron（每 5 分钟 + 开机拉起），可重复执行
+#   bash keepalive.sh --install-cron    # 装好 cron（每 5 分钟 + 开机拉起），可重复执行；条目里写死 node 绝对路径，换 node 版本后重装
 #   bash keepalive.sh --uninstall-cron
 #   source keepalive.sh          # 只定义函数、不执行（测试用）
 #
@@ -187,13 +187,19 @@ if [ "${1:-}" = "--install-cron" ] || [ "${1:-}" = "--uninstall-cron" ]; then
   if [ "$1" = "--uninstall-cron" ]; then
     printf '%s\n' "$CUR" | sed '/^$/d' | crontab - && echo "已移除 cron 条目"; exit $?
   fi
-  KA="/bin/bash $(printf '%q' "$ROOT/keepalive.sh") >/dev/null 2>&1"
+  # cron 的 PATH 只有 /usr/bin:/bin：把 node 的绝对路径和它所在目录写进条目（nvm、/usr/local/bin 也能找到）
+  [ -n "$NODE_BIN" ] || { echo "找不到 node：先让 node 在 PATH 里，或 NODE_BIN=/node/的/绝对路径 bash keepalive.sh --install-cron"; exit 2; }
+  case "$NODE_BIN" in /*) NODE_ABS="$NODE_BIN" ;; *) NODE_ABS="$(realpath -- "$NODE_BIN" 2>/dev/null || echo "$NODE_BIN")" ;; esac
+  [ -x "$NODE_ABS" ] || { echo "node 不可执行：$NODE_ABS"; exit 2; }
+  CRON_PATH="$(dirname "$NODE_ABS")"
+  for d in /usr/local/bin /usr/bin /bin; do case ":$CRON_PATH:" in *":$d:"*) ;; *) CRON_PATH="$CRON_PATH:$d" ;; esac; done
+  KA="NODE_BIN=$(printf '%q' "$NODE_ABS") PATH=$(printf '%q' "$CRON_PATH") /bin/bash $(printf '%q' "$ROOT/keepalive.sh") >/dev/null 2>&1"
   {
     printf '%s\n' "$CUR" | sed '/^$/d'
     echo "*/5 * * * * $KA $MARK"
     echo "@reboot sleep 30 && $KA $MARK"
   } | crontab - || exit 1
-  echo "已安装 cron：每 5 分钟检查一次 + 开机 30 秒后拉起"
+  echo "已安装 cron：每 5 分钟检查一次 + 开机 30 秒后拉起（node：$NODE_ABS；换了 node 版本要重新安装）"
   crontab -l | grep -F "$MARK"
   pgrep -x cron >/dev/null 2>&1 || pgrep -x crond >/dev/null 2>&1 || echo "警告：cron 服务似乎没在运行（service cron start）"
   exit 0

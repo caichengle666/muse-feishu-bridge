@@ -123,7 +123,7 @@ Muse 会在浏览器里帮你走完：
 inbox 里的消息不会自己处理——部署完 daemon 后必须创建一个轮询 hook（习惯名 `feishu-inbox-watch`）。
 本仓库 `hooks/` 目录已备好开箱即用的脚本和定义模板：
 
-- `hooks/feishu-inbox-watch.sh` → 复制到 `~/hooks/scripts/feishu-inbox-watch.sh`
+- `hooks/feishu-inbox-watch.sh` → 复制到 `~/hooks/scripts/feishu-inbox-watch.sh`；桥接目录自动定位（默认 `~/workspace/muse-feishu-bridge`，不在那就在 `$HOME` 下 3 层内找唯一一份），装在别处一般不用改；装了多份时设 `MUSE_FEISHU_ROOT` 或改脚本里的 `DEFAULT_BRIDGE_ROOT`。hook prompt 里的路径写作 `<bridge_root>`，由 wake payload 的 `bridge_root` 给出
 - `hooks/feishu-inbox-watch.json` → 用 `hooks.add` 注册，把 `delivery.to` 换成用户自己的 side chat ID；定义里必须有 `created_at_ms` / `updated_at_ms`（毫秒时间戳，模板已带，直接写定义文件时改成当前时间），缺了解析失败、轮询静默不跑
 - **必须指定 `poll_interval_secs: 5`**（hook 允许的最小值；不指定默认 60 秒，用户发消息后要等一分钟才有回复）
 - 轮询脚本逻辑：检查 `inbox/` 有无新的 `.json`，有则原子认领（rename 为 `.json.claimed`）后 `wake` 唤醒 worker
@@ -195,7 +195,7 @@ daemon 重启或长连接重连后，自动把断线期间的消息拉回来补�
 
 ## 保活与自检
 
-- `keepalive.sh --install-cron`：cron 每 5 分钟检查、开机后拉起；`--uninstall-cron` 移除
+- `keepalive.sh --install-cron`：cron 每 5 分钟检查、开机后拉起（条目里写死当前 node 的绝对路径和 PATH，nvm 也能用；换了 node 版本重新装一次）；`--uninstall-cron` 移除
 - hook 兜底：心跳停 90 秒直接调用 keepalive 拉起（不依赖 cron）；心跳停 10 分钟仍没救回、或 outbox 里的回复超过 3 分钟没发出，会唤醒 worker（payload 带 `health_issue`），worker 先跑 `bash keepalive.sh`、看 `daemon.log` 修复，再向用户报告；同一故障每小时最多提醒一次
 - `npm run doctor`：只读自检，有 FAIL 退出码 1
 

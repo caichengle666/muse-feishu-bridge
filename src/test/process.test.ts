@@ -229,6 +229,8 @@ test("e2e: keepalive --install-cron 幂等，不动用户其他条目；--uninst
   assert.equal(lines.length, 3);
   assert.ok(lines[0].includes("backup.sh"));
   assert.ok(lines.some((l) => l.startsWith("*/5 * * * * ") && l.includes("keepalive.sh")));
+  // cron 的 PATH 只有 /usr/bin:/bin：条目里必须带 node 绝对路径和 PATH（nvm 装的 node 也能找到）
+  assert.ok(lines.filter((l) => l.includes("keepalive.sh")).every((l) => /NODE_BIN=\/\S*node /.test(l) && l.includes(" PATH=")));
   assert.ok(lines.some((l) => l.startsWith("@reboot ")));
   assert.equal(spawnSync("bash", [ka, "--uninstall-cron"], { env }).status, 0);
   assert.deepEqual(readFileSync(tab, "utf8").trim().split("\n"), ["0 3 * * * /usr/bin/backup.sh"]);
