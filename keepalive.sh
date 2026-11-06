@@ -4,40 +4,82 @@
 # daemon 自己再用 O_EXCL 的 daemon.lock 保证单实例。
 #
 # 用法：
-#   bash keepalive.sh            # 检查并在需要时拉起
+#   bash keepalive.sh            # 检查并在需要时拉起（连续拉起失败后按退避间隔跳过）
+#   bash keepalive.sh --force    # 同上，但忽略退避立即重试（排障时手动用）
 #   bash keepalive.sh --status   # 只检查：健康 exit 0，不健康 exit 1（不做任何动作）
-#   bash keepalive.sh --install-cron    # 装好 cron（每 5 分钟 + 开机拉起），可重复执行；条目里写死 node 绝对路径，换 node 版本后重装
+#   bash keepalive.sh --install-cron    # 装 cron：每 5 分钟检查 + 开机 30 秒后拉起（可重复执行）
 #   bash keepalive.sh --uninstall-cron
 #   source keepalive.sh          # 只定义函数、不执行（测试用）
 #
 # 环境变量（都可选）：
-#   MUSE_FEISHU_ROOT        运行目录，默认本脚本所在目录（一律 realpath 规范化）
+#   MUSE_FEISHU_ROOT        运行（数据）目录，默认本脚本所在目录（一律 realpath 规范化）。可以是纯数据目录：
+#                          那里没有 dist/daemon.js 时，用本脚本所在仓库的 dist/daemon.js 启动（代码与数据分开）
 #   MUSE_FEISHU_GRACE_SEC   刚断线（connected:false）的宽限秒数，默认 90
 #   MUSE_FEISHU_START_GRACE_SEC  新进程的宽限秒数（给建连机会），默认同 GRACE
 #   MUSE_FEISHU_STALE_SEC   心跳多久不更新算停滞，默认 90
 #   MUSE_FEISHU_WAIT_SEC    拉起后等待"已连接"心跳的秒数，默认 45
 #   MUSE_FEISHU_FLOCK_BIN   flock 路径，默认 command -v flock；设为空串则视为没有 flock（走 mkdir 锁）
-#   NODE_BIN               node 路径，默认 command -v node
+#   MUSE_FEISHU_BACKOFF_MAX_SEC  连续拉起失败后的最长退避秒数，默认 1800（2→4→8…分钟，封顶这个值；连上后清零）
+#   MUSE_FEISHU_LOG_MAX_MB  daemon.log / keepalive.cron.log 超过这么多 MB 就轮转成 .1（copytruncate），默认 10
+#   以上数值必须是整数（宽限/停滞秒数可为 0，其余 ≥1），写错（如 90s）时改用默认值并在 daemon.log 里警告
+#   NODE_BIN               node 路径，默认 command -v node；都找不到时读 $ROOT/.node-bin（--install-cron 或上次运行记下的）
 #
 # 进程身份：daemon.pid 一行 `<pid> <starttime> <token>`，heartbeat.json 也带 token。
 # 只有 pid 存在 且 /proc/<pid>/stat 的 starttime 与记录相同 且 心跳 token 与 pid 文件相同
 # 且 命令行里的 daemon.js（相对路径按 /proc/<pid>/cwd 解析后 realpath）就是 $ROOT/dist/daemon.js，
 # 才认为"是我们的 daemon"，也只有这时才会去 kill 它——pid 被复用时绝不误杀无关进程。
+# 例外：pid + starttime + 脚本路径都对上（已排除 pid 复用），只是心跳文件缺失/损坏/令牌不符，且进程已过启动宽限、
+# 心跳文件超过 STALE 秒没更新——这是心跳写不出来的假死进程，也会被杀掉重拉（否则它占着 daemon.lock 永远卡住）。
 set -u
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_RAW="${MUSE_FEISHU_ROOT:-$SCRIPT_DIR}"
 ROOT="$(realpath -m -- "$ROOT_RAW" 2>/dev/null || readlink -f -- "$ROOT_RAW" 2>/dev/null || echo "$ROOT_RAW")"
 LOG="$ROOT/daemon.log"
 PIDFILE="$ROOT/daemon.pid"
 HEARTBEAT="$ROOT/heartbeat.json"
-DAEMON_JS="$ROOT/dist/daemon.js"
+# daemon.js：ROOT 是完整仓库副本时用 ROOT 里的（以前的行为）；ROOT 是纯数据目录时用本脚本所在仓库的
+CODE_DAEMON_JS="$SCRIPT_DIR/dist/daemon.js"
+if [ -f "$ROOT/dist/daemon.js" ] || [ ! -f "$CODE_DAEMON_JS" ]; then DAEMON_JS="$ROOT/dist/daemon.js"; else DAEMON_JS="$CODE_DAEMON_JS"; fi
 DAEMON_JS_REAL="$(realpath -m -- "$DAEMON_JS" 2>/dev/null || echo "$DAEMON_JS")"
+ROOT_DAEMON_JS_REAL="$(realpath -m -- "$ROOT/dist/daemon.js" 2>/dev/null || echo "$ROOT/dist/daemon.js")"
+CODE_DAEMON_JS_REAL="$(realpath -m -- "$CODE_DAEMON_JS" 2>/dev/null || echo "$CODE_DAEMON_JS")"
 GRACE="${MUSE_FEISHU_GRACE_SEC:-90}"
 START_GRACE="${MUSE_FEISHU_START_GRACE_SEC:-$GRACE}"
 STALE="${MUSE_FEISHU_STALE_SEC:-90}"
 WAIT_SEC="${MUSE_FEISHU_WAIT_SEC:-45}"
+BACKOFF_MAX="${MUSE_FEISHU_BACKOFF_MAX_SEC:-1800}"
+LOG_MAX_MB="${MUSE_FEISHU_LOG_MAX_MB:-10}"
+BACKOFF_BASE=120
+BACKOFF_FILE="$ROOT/.keepalive-backoff"
+CRON_LOG="$ROOT/keepalive.cron.log"
+
+# 数值参数必须是整数：写成 "90s"、"-1"、空串时 [ -lt ] 会报错，脚本就会把健康的 daemon 判成不健康反复杀掉。
+# 宽限/停滞秒数允许 0（不给宽限），等待秒数、退避上限、日志上限必须 ≥1；前导 0 按十进制处理
+BAD_NUM=""
+num_env() {
+  local var="$1" def="$2" env="$3" min="$4" v
+  v="${!var}"
+  if [[ "$v" =~ ^[0-9]{1,9}$ ]] && [ $((10#$v)) -ge "$min" ]; then
+    printf -v "$var" '%s' "$((10#$v))"
+  else
+    BAD_NUM="${BAD_NUM}${env}='${v}'→${def} "
+    printf -v "$var" '%s' "$def"
+  fi
+}
+pos_int() { num_env "$1" "$2" "$3" 1; }
+num_env GRACE 90 MUSE_FEISHU_GRACE_SEC 0
+[ -n "${MUSE_FEISHU_START_GRACE_SEC:-}" ] || START_GRACE="$GRACE"
+num_env START_GRACE "$GRACE" MUSE_FEISHU_START_GRACE_SEC 0
+num_env STALE 90 MUSE_FEISHU_STALE_SEC 0
+pos_int WAIT_SEC 45 MUSE_FEISHU_WAIT_SEC
+pos_int BACKOFF_MAX 1800 MUSE_FEISHU_BACKOFF_MAX_SEC
+pos_int LOG_MAX_MB 10 MUSE_FEISHU_LOG_MAX_MB
 NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
+if [ -z "$NODE_BIN" ] && [ -f "$ROOT/.node-bin" ]; then
+  NODE_BIN="$(head -1 "$ROOT/.node-bin" 2>/dev/null || true)"
+  [ -x "$NODE_BIN" ] || NODE_BIN=""
+fi
 FLOCK_BIN="${MUSE_FEISHU_FLOCK_BIN-$(command -v flock || true)}"
 
 log() { echo "[$(date -u '+%FT%TZ')] keepalive: $*" >> "$LOG"; }
@@ -87,7 +129,7 @@ daemon_script_of() {
   realpath -m -- "$script" 2>/dev/null
 }
 
-# pid 存在 + starttime 与记录相同 + 命令行脚本就是本 ROOT 的 dist/daemon.js
+# pid 存在 + starttime 与记录相同 + 命令行脚本就是本 ROOT 的 dist/daemon.js（ROOT 是纯数据目录时也认本仓库的）
 is_our_daemon() {
   local pid="$1" st="$2" cur script
   [ -n "$pid" ] && [ -n "$st" ] || return 1
@@ -95,7 +137,21 @@ is_our_daemon() {
   cur="$(proc_starttime "$pid")" || return 1
   [ "$cur" = "$st" ] || return 1
   script="$(daemon_script_of "$pid")" || return 1
-  [ "$script" = "$DAEMON_JS_REAL" ]
+  [ "$script" = "$DAEMON_JS_REAL" ] || [ "$script" = "$ROOT_DAEMON_JS_REAL" ] ||
+    { [ "$ROOT" != "$SCRIPT_DIR" ] && [ "$script" = "$CODE_DAEMON_JS_REAL" ]; }
+}
+
+# 记下 node 绝对路径和本脚本位置，给 hook 兜底拉起用（hook 的 PATH 里可能没有 nvm 的 node；数据目录里可能没有 keepalive.sh）
+remember_paths() {
+  local nb="$1" f
+  case "$nb" in /*) ;; *) nb="$(command -v -- "$nb" 2>/dev/null || true)" ;; esac
+  if [ -n "$nb" ] && [ -x "$nb" ] && [ "$(cat "$ROOT/.node-bin" 2>/dev/null)" != "$nb" ]; then
+    f="$ROOT/.node-bin.tmp.$$"; printf '%s\n' "$nb" > "$f" 2>/dev/null && mv -f -- "$f" "$ROOT/.node-bin" 2>/dev/null || rm -f -- "$f"
+  fi
+  if [ "$ROOT" != "$SCRIPT_DIR" ] && [ "$(cat "$ROOT/.keepalive-path" 2>/dev/null)" != "$SCRIPT_DIR/keepalive.sh" ]; then
+    f="$ROOT/.keepalive-path.tmp.$$"; printf '%s\n' "$SCRIPT_DIR/keepalive.sh" > "$f" 2>/dev/null && mv -f -- "$f" "$ROOT/.keepalive-path" 2>/dev/null || rm -f -- "$f"
+  fi
+  return 0
 }
 
 # 输出 "<pid> <ts秒> <connected 0/1> <token|->"；读不到输出 "0 0 0 -"
@@ -174,6 +230,60 @@ acquire_ka_lock() {
   return 0
 }
 
+# 退避状态：$ROOT/.keepalive-backoff 一行 `<连续失败次数> <下次最早可拉起的 epoch 秒>`
+backoff_read() {
+  BO_FAILS=0 BO_NEXT=0
+  read -r BO_FAILS BO_NEXT _ < "$BACKOFF_FILE" 2>/dev/null || true
+  [[ "${BO_FAILS:-}" =~ ^[0-9]+$ ]] || BO_FAILS=0
+  [[ "${BO_NEXT:-}" =~ ^[0-9]+$ ]] || BO_NEXT=0
+}
+backoff_active() {
+  backoff_read
+  [ "$BO_FAILS" -gt 0 ] && [ "$(date +%s)" -lt "$BO_NEXT" ]
+}
+# 记一次失败，算出下次间隔 BO_DELAY：BASE×2^(n-1)，封顶 BACKOFF_MAX
+backoff_fail() {
+  local sh f
+  backoff_read
+  BO_FAILS=$((BO_FAILS + 1))
+  sh=$((BO_FAILS - 1)); [ "$sh" -gt 10 ] && sh=10
+  BO_DELAY=$((BACKOFF_BASE << sh))
+  [ "$BO_DELAY" -gt "$BACKOFF_MAX" ] && BO_DELAY="$BACKOFF_MAX"
+  f="$BACKOFF_FILE.tmp.$$"
+  printf '%s %s\n' "$BO_FAILS" "$(( $(date +%s) + BO_DELAY ))" > "$f" 2>/dev/null && mv -f -- "$f" "$BACKOFF_FILE" 2>/dev/null || rm -f -- "$f"
+}
+backoff_clear() {
+  [ -e "$BACKOFF_FILE" ] && rm -f -- "$BACKOFF_FILE"
+  return 0
+}
+
+# 日志轮转（copytruncate：daemon 以追加方式持有 daemon.log，复制后截断不影响它继续写）
+rotate_logs() {
+  local f sz max=$((LOG_MAX_MB * 1024 * 1024))
+  for f in "$LOG" "$CRON_LOG"; do
+    sz="$(stat -c %s -- "$f" 2>/dev/null || echo 0)"
+    if [ "${sz:-0}" -gt "$max" ] 2>/dev/null; then
+      cp -f -- "$f" "$f.1" 2>/dev/null && : > "$f"
+    fi
+  done
+  return 0
+}
+
+# 杀掉已核实身份的 daemon：先 TERM，10 秒不退再 KILL
+kill_daemon() {
+  local pid="$1" st="$2"
+  kill "$pid" 2>/dev/null
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    is_our_daemon "$pid" "$st" || return 0
+    sleep 1
+  done
+  if is_our_daemon "$pid" "$st"; then
+    kill -9 "$pid" 2>/dev/null
+    sleep 1
+  fi
+  return 0
+}
+
 # 被 source 时只定义函数（测试用）
 if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0 2>/dev/null || true
@@ -193,7 +303,12 @@ if [ "${1:-}" = "--install-cron" ] || [ "${1:-}" = "--uninstall-cron" ]; then
   [ -x "$NODE_ABS" ] || { echo "node 不可执行：$NODE_ABS"; exit 2; }
   CRON_PATH="$(dirname "$NODE_ABS")"
   for d in /usr/local/bin /usr/bin /bin; do case ":$CRON_PATH:" in *":$d:"*) ;; *) CRON_PATH="$CRON_PATH:$d" ;; esac; done
-  KA="NODE_BIN=$(printf '%q' "$NODE_ABS") PATH=$(printf '%q' "$CRON_PATH") /bin/bash $(printf '%q' "$ROOT/keepalive.sh") >/dev/null 2>&1"
+  # 脚本用本仓库的（ROOT 可能是纯数据目录，里面没有 keepalive.sh）；ROOT 不是脚本目录时带上 MUSE_FEISHU_ROOT
+  KA_ENV=""
+  [ "$ROOT" = "$SCRIPT_DIR" ] || KA_ENV="MUSE_FEISHU_ROOT=$(printf '%q' "$ROOT") "
+  KA="${KA_ENV}NODE_BIN=$(printf '%q' "$NODE_ABS") PATH=$(printf '%q' "$CRON_PATH") /bin/bash $(printf '%q' "$SCRIPT_DIR/keepalive.sh") >>$(printf '%q' "$CRON_LOG") 2>&1"
+  mkdir -p "$ROOT" 2>/dev/null || true
+  remember_paths "$NODE_ABS"
   {
     printf '%s\n' "$CUR" | sed '/^$/d'
     echo "*/5 * * * * $KA $MARK"
@@ -206,33 +321,49 @@ if [ "${1:-}" = "--install-cron" ] || [ "${1:-}" = "--uninstall-cron" ]; then
 fi
 
 if [ "${1:-}" = "--status" ]; then
+  [ -z "$BAD_NUM" ] || echo "警告：环境变量不是合法整数，已改用默认值：$BAD_NUM" >&2
   if is_healthy; then echo "healthy"; exit 0; fi
   echo "unhealthy"; exit 1
 fi
 
+FORCE=0
+[ "${1:-}" = "--force" ] && FORCE=1
+
 mkdir -p "$ROOT" 2>/dev/null || true
 
 acquire_ka_lock || exit 0
+rotate_logs
+[ -z "$BAD_NUM" ] || log "警告：环境变量不是合法整数，已改用默认值：$BAD_NUM"
+[ -n "$NODE_BIN" ] && remember_paths "$NODE_BIN"
 
 if is_healthy; then
+  # 只有真连上了才清退避（启动宽限期内也算"健康"，但那时还不知道能不能连上）
+  [ "${HB_CONN:-0}" = "1" ] && backoff_clear
+  exit 0
+fi
+
+# 连续拉起失败（凭证错、网络/代理长时间不通）时退避：hook 每 2 分钟、cron 每 5 分钟都会来，不退避就会一直杀了重拉
+if [ "$FORCE" = "0" ] && backoff_active; then
   exit 0
 fi
 
 # 只有身份完全核实（pid + starttime + 心跳 token + ROOT 脚本）的进程才杀：假死 / 长时间断线
 if identity_verified; then
-  OLD_PID="$ID_PID" OLD_ST="$ID_ST"
-  log "进程 $OLD_PID 存在但不健康（心跳停滞或未连接），杀掉重拉"
-  kill "$OLD_PID" 2>/dev/null
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    is_our_daemon "$OLD_PID" "$OLD_ST" || break
-    sleep 1
-  done
-  if is_our_daemon "$OLD_PID" "$OLD_ST"; then
-    kill -9 "$OLD_PID" 2>/dev/null
-    sleep 1
+  log "进程 $ID_PID 存在但不健康（心跳停滞或未连接），杀掉重拉"
+  kill_daemon "$ID_PID" "$ID_ST"
+elif read_pidfile && is_our_daemon "$PF_PID" "$PF_ST"; then
+  # pid + starttime + 脚本路径都对上（不是 pid 复用），只是心跳核不上：缺失 / 损坏 / 令牌不符
+  ka_age="$(ps -o etimes= -p "$PF_PID" 2>/dev/null | tr -d ' ')"
+  hb_mtime="$(stat -c %Y -- "$HEARTBEAT" 2>/dev/null || echo 0)"
+  if [[ "$ka_age" =~ ^[0-9]+$ ]] && [ "$ka_age" -ge "$START_GRACE" ] && [ $(( $(date +%s) - hb_mtime )) -ge "$STALE" ]; then
+    log "进程 $PF_PID 是本 daemon，但心跳文件缺失/损坏/令牌不符且 ${STALE}s 没更新（心跳写不出来的假死），杀掉重拉"
+    kill_daemon "$PF_PID" "$PF_ST"
+  else
+    # 刚启动还没写心跳，或心跳刚写过：不杀（照常尝试拉起；真是它占着 daemon.lock，新进程会自己退出）
+    log "进程 $PF_PID 是本 daemon，但心跳暂未核实（刚启动或心跳刚写），不杀它"
   fi
 elif read_pidfile && [ -d "/proc/$PF_PID" ]; then
-  log "pid 文件指向的进程 $PF_PID 身份不符（启动时间/令牌/ROOT 不匹配，可能是 pid 复用），不杀它"
+  log "pid 文件指向的进程 $PF_PID 身份不符（启动时间/ROOT 不匹配，可能是 pid 复用），不杀它"
 fi
 
 [ -n "$NODE_BIN" ] || { log "找不到 node"; exit 1; }
@@ -249,8 +380,10 @@ for _ in $(seq 1 "$WAIT_SEC"); do
   identity_verified || continue
   if [ "$HB_CONN" = "1" ]; then
     log "拉起成功（pid $ID_PID），长连接已就绪"
+    backoff_clear
     exit 0
   fi
 done
-log "拉起后 ${WAIT_SEC}s 内未见已连接心跳，见 daemon.log / debug.log"
+backoff_fail
+log "拉起后 ${WAIT_SEC}s 内未见已连接心跳（连续第 ${BO_FAILS} 次），${BO_DELAY}s 内不再自动重拉（--force 可立即重试），见 daemon.log / debug.log"
 exit 1
