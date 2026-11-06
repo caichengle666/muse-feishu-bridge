@@ -160,11 +160,14 @@ outbox（助手写，**请先写临时文件再 rename**）：
 ```bash
 bash keepalive.sh            # 健康则静默退出；进程不在 / 心跳停滞 / 长时间断线则拉起
 bash keepalive.sh --status   # 只检查
+bash keepalive.sh --force    # 忽略退避立即重试
 bash keepalive.sh --install-cron    # 一键装 cron：每 5 分钟检查 + 开机 30 秒后拉起（可重复执行；条目里写死 node 绝对路径，换 node 版本后重装）
 bash keepalive.sh --uninstall-cron
 ```
 
 keepalive 用 pid + 进程启动时间 + 启动令牌核实身份，只会杀自己拉起的 daemon；自身有 flock（无 flock 时 mkdir 锁）防并发。daemon 自己也持有 `daemon.lock`，手动重复启动会被拒绝。
+
+连续拉起失败会退避（2→4→8…分钟，封顶 `MUSE_FEISHU_BACKOFF_MAX_SEC`，默认 30 分钟；连上清零），断网时不会每两分钟杀一次；手动排障用 `bash keepalive.sh --force` 跳过退避。数值环境变量写错时用默认值并警告；心跳文件坏掉的本 daemon 进程超时后也会被杀掉重拉；`daemon.log`、`keepalive.cron.log` 超过 `MUSE_FEISHU_LOG_MAX_MB`（默认 10）MB 自动轮转成 `.1`。
 
 三层保活：
 
