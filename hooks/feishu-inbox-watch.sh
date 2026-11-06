@@ -45,6 +45,9 @@ resolve_bridge_root() {
     mkdir -p "$(dirname "$cache")" && printf '%s\n' "$found" > "$cache.tmp" && mv "$cache.tmp" "$cache"
     printf '%s\n' "$found"; return
   fi
+  if [ -n "$found" ]; then
+    echo "feishu-inbox-watch: 在 \$HOME 下找到多份 muse-feishu-bridge，退回默认 $DEFAULT_BRIDGE_ROOT；请设 MUSE_FEISHU_ROOT 或改 DEFAULT_BRIDGE_ROOT：$(printf '%s' "$found" | tr '\n' ' ')" >&2
+  fi
   printf '%s\n' "$DEFAULT_BRIDGE_ROOT"   # 找不到或不唯一：退回默认（doctor 会报 FAIL）
 }
 BRIDGE_ROOT="$(resolve_bridge_root)"
@@ -416,11 +419,17 @@ if [ "$count" -eq 0 ]; then
   fi
   # 自愈：心跳停了 90 秒就直接拉起 daemon（keepalive 自己判断健康、核实身份、带锁，健康时什么也不做）
   HEAL_MARK="$CTX_DIR/.$NAME-heal-attempt"
-  if [ "$hb_age" -gt "$HEAL_AFTER_SECS" ] && [ -f "$BRIDGE_ROOT/keepalive.sh" ]; then
+  # keepalive.sh 位置：一般就在 BRIDGE_ROOT；MUSE_FEISHU_ROOT 指向纯数据目录时，keepalive 运行时会把自己的路径记在 .keepalive-path
+  KA_SH="$BRIDGE_ROOT/keepalive.sh"
+  [ -f "$KA_SH" ] || KA_SH="$(cat "$BRIDGE_ROOT/.keepalive-path" 2>/dev/null || true)"
+  if [ "$hb_age" -gt "$HEAL_AFTER_SECS" ] && [ -n "$KA_SH" ] && [ -f "$KA_SH" ]; then
     last_heal=$(stat -c %Y "$HEAL_MARK" 2>/dev/null || echo 0)
     if [ $((now - last_heal)) -ge "$HEAL_EVERY_SECS" ]; then
       touch "$HEAL_MARK"
-      setsid bash "$BRIDGE_ROOT/keepalive.sh" >/dev/null 2>&1 < /dev/null &
+      # hook 运行时的 PATH 里可能没有 nvm 的 node：用 keepalive / --install-cron 记下的 .node-bin 兜底
+      ka_node="${NODE_BIN:-$(command -v node 2>/dev/null || true)}"
+      [ -n "$ka_node" ] || ka_node="$(cat "$BRIDGE_ROOT/.node-bin" 2>/dev/null || true)"
+      NODE_BIN="$ka_node" MUSE_FEISHU_ROOT="$BRIDGE_ROOT" setsid bash "$KA_SH" >/dev/null 2>&1 < /dev/null &
     fi
   fi
   if [ ! -f "$HB" ]; then
