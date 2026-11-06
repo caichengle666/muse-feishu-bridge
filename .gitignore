@@ -26,3 +26,9 @@ daemon.lock.stale.*
 .keepalive.lock.d/
 .DS_Store
 onboard-qr.png
+.node-bin
+.node-bin.tmp.*
+.keepalive-path
+.keepalive-path.tmp.*
+.keepalive-backoff
+.keepalive-backoff.tmp.*
