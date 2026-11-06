@@ -198,10 +198,20 @@ daemon 重启或长连接重连后，自动把断线期间的消息拉回来补�
 
 - `keepalive.sh --install-cron`：cron 每 5 分钟检查 + 开机 30 秒后拉起（可重复执行）。cron 的 PATH 只有 `/usr/bin:/bin`，所以条目里写死 `NODE_BIN=<node 绝对路径>` 和 `PATH=<node 所在目录>:/usr/local/bin:/usr/bin:/bin`，nvm 装的 node 也能拉起；安装时 node 必须在 PATH 里，或用 `NODE_BIN=/node/绝对路径 bash keepalive.sh --install-cron`，找不到/不可执行时退出码 2。换了 node 版本重新装一次；`--uninstall-cron` 移除
 - `bash keepalive.sh --status` 只检查（健康 0、不健康 1，不做动作）；keepalive 拉起 daemon 时带 `MUSE_FEISHU_ROOT=<本目录>`
-- hook 兜底：心跳停 90 秒直接调用 keepalive 拉起（不依赖 cron）；心跳停 10 分钟仍没救回、或 outbox 里的回复超过 3 分钟没发出，会唤醒 worker（payload 带 `health_issue`），worker 先跑 `bash keepalive.sh`、看 `daemon.log` 修复，再向用户报告；同一故障每小时最多提醒一次
+- hook 兜底：心跳停 90 秒直接调用 keepalive 拉起（不依赖 cron）；心跳停 10 分钟仍没救回、或 outbox 里的回复超过 3 分钟没发出，会唤醒 worker（payload 带 `health_issue`），worker 先跑 `bash keepalive.sh --force`、看 `daemon.log` 修复，再向用户报告；同一故障每小时最多提醒一次
+- `MUSE_FEISHU_ROOT` 可以指向和代码分开的纯数据目录：那里没有 `dist/daemon.js` 时 keepalive 用脚本所在仓库的；`--install-cron` 写仓库里的 `keepalive.sh` 并带上 `MUSE_FEISHU_ROOT`（ROOT 就是脚本目录时条目不带）
+- keepalive 运行和 `--install-cron` 时把 node 绝对路径记到 `<ROOT>/.node-bin`（数据目录与代码分开时再记 `.keepalive-path`）；自己找不到 node 时也读 `.node-bin`；hook 兜底拉起时传 `NODE_BIN`（PATH 里没有 node 就用 `.node-bin`）和 `MUSE_FEISHU_ROOT`
+- 连续拉起失败（拉起后 WAIT_SEC 内没连上）会退避：第 1 次失败后 2 分钟内不再自动拉起，之后 4、8、16 分钟……封顶 `MUSE_FEISHU_BACKOFF_MAX_SEC`（默认 1800）；连上后清零。退避期间已在跑的 daemon 不会被杀（让 SDK 自己重连）。状态在 `<ROOT>/.keepalive-backoff`；手动排障用 `bash keepalive.sh --force` 忽略退避立即重试
+- 数值环境变量（`MUSE_FEISHU_GRACE_SEC` / `_START_GRACE_SEC` / `_STALE_SEC` 可为 0，`_WAIT_SEC` / `_BACKOFF_MAX_SEC` / `_LOG_MAX_MB` ≥1）写错（如 `90s`）时改用默认值并在 daemon.log 警告，不会再把健康的 daemon 当成不健康反复杀
+- pid + 启动时间 + 命令行脚本都对上（排除 pid 复用）、只是心跳文件缺失/损坏/令牌不符的进程：过了启动宽限且心跳文件 STALE 秒没更新，也会被杀掉重拉（以前会一直占着 daemon.lock 卡死）
+- `daemon.log` 和 cron 输出 `keepalive.cron.log` 超过 `MUSE_FEISHU_LOG_MAX_MB`（默认 10）MB 时轮转成 `.1`（复制后截断，daemon 不用重启）；cron 条目的输出不再丢进 `/dev/null`
 - `npm run doctor`：只读自检，有 FAIL 退出码 1。会检查：cron 条目是否带 `NODE_BIN=`（没带 WARN，重跑 `--install-cron`）；hook 脚本算出的桥接目录是否就是本目录（不是则 FAIL）；`~/hooks/scripts/` 里的 hook 脚本是否与仓库 `hooks/` 一致（不一致 WARN，重新 cp）；hook 定义是否已注册
 
-### 升级已有部署（如升到 0.5.5）
+### 升级已有部署（如升到 0.5.6）
+
+从 0.5.5 升：`git pull`，重新 `cp hooks/feishu-inbox-watch.sh ~/hooks/scripts/feishu-inbox-watch.sh`（兜底拉起改带 `NODE_BIN` / `MUSE_FEISHU_ROOT`），按新的 `hooks/feishu-inbox-watch.json` 更新 hook 定义（prompt 第 0 步改成 `keepalive.sh --force`），装过 cron 的重跑 `bash keepalive.sh --install-cron`（输出改写到 `keepalive.cron.log`）。daemon 代码没变，不用重启。
+
+更早版本：
 
 `npm ci && npm run build && npm test` 后：重新 `cp hooks/feishu-inbox-watch.sh ~/hooks/scripts/feishu-inbox-watch.sh`；hook 定义模板有变化时（0.5.5 的 prompt 改用 `<bridge_root>`）按新模板更新已注册的 hook（保留用户自己的 `delivery.to`，`updated_at_ms` 改成当前时间）；旧 cron 条目没写 node 路径的，重跑 `bash keepalive.sh --install-cron`；重启 daemon 后 `npm run doctor` 无 FAIL 再收尾。
 
